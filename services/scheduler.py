@@ -5,18 +5,15 @@ from aiogram import Bot
 from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
 from aiogram.exceptions import TelegramRetryAfter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 from config import (
-    SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE, ALBUM_SIZE, JOBS_DB_PATH,
+    SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE, ALBUM_SIZE,
 )
 from services import storage, scraper, reddit
 
-# Задачи хранятся в SQLite — переживают перезапуск бота.
-os.makedirs(os.path.dirname(JOBS_DB_PATH), exist_ok=True)
-scheduler = AsyncIOScheduler(
-    jobstores={"default": SQLAlchemyJobStore(url=f"sqlite:///{JOBS_DB_PATH}")}
-)
+# Задачи держим в памяти. При перезапуске они заново создаются из
+# storage.json через reschedule_all() — это и есть наша персистентность.
+scheduler = AsyncIOScheduler()
 
 VIDEO_EXT = (".mp4", ".webm", ".mov")
 

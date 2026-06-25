@@ -3,8 +3,10 @@ import re
 import logging
 import subprocess
 import tempfile
+import time
 
 import requests
+from playwright.sync_api import sync_playwright
 
 from config import (
     REDDIT_USER_AGENT, REDDIT_LIMIT,
@@ -14,7 +16,20 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-HEADERS = {"User-Agent": REDDIT_USER_AGENT}
+# Reddit режет запросы с "питоновским" User-Agent и без браузерных заголовков.
+# Поэтому притворяемся обычным браузером — это главное лекарство от 403 Blocked.
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/html;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.reddit.com/",
+    "Connection": "keep-alive",
+}
 
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
@@ -38,18 +53,99 @@ def _has_ffmpeg() -> bool:
     except Exception:
         return False
 
+# Несколько зеркал Reddit. Пробуем по очереди — если один домен блокирует,
+# другой часто отдаёт данные. old.reddit.com обычно самый "мягкий".
+_REDDIT_HOSTS = (
+    "https://old.reddit.com",
+    "https://www.reddit.com",
+    "https://reddit.com",
+)
+
+def _fetch_via_browser(subreddit: str, sort: str, period: str) -> list:
+    """
+    Запасной способ: открываем JSON-страницу Reddit настоящим браузером
+    через Playwright. Reddit не считает его ботом, поэтому 403 обходится.
+    """
+    import json
+
+    url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={REDDIT_LIMIT}&raw_json=1"
+    if sort == "top":
+        url += f"&t={period}"
+
+    logger.info("Playwright: открываю %s", url)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=HEADERS["User-Agent"],
+            locale="en-US",
+        )
+        page = context.new_page()
+        try:
+            resp = page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            status = resp.status if resp else "нет ответа"
+            logger.info("Playwright: статус ответа = %s", status)
+            body = page.inner_text("body")
+        finally:
+            browser.close()
+
+    # покажем первые символы ответа, чтобы понять, что прислал Reddit
+    preview = body[:200].replace("\n", " ")
+    logger.info("Playwright: начало ответа: %s", preview)
+
+    try:
+        data = json.loads(body)
+    except Exception:
+        raise RuntimeError(
+            "Reddit вернул не JSON (вероятно страницу блокировки/капчи). "
+            f"Начало ответа: {preview}"
+        )
+
+    posts = [c["data"] for c in data["data"]["children"]]
+    logger.info("Playwright: получено постов = %s", len(posts))
+    return posts
 
 def _fetch_listing(subreddit: str, sort: str, period: str) -> list:
-    """Берёт ленту сабреддита через публичный JSON API."""
-    url = f"https://www.reddit.com/r/{subreddit}/{sort}.json"
+    """
+    Берёт ленту сабреддита через публичный JSON, без OAuth.
+    Перебирает зеркала и делает повтор при 429 (слишком много запросов).
+    """
     params = {"limit": REDDIT_LIMIT, "raw_json": 1}
     # период t= нужен только для сортировки top
     if sort == "top":
         params["t"] = period
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    return [child["data"] for child in data["data"]["children"]]
+
+    last_error = None
+
+    for host in _REDDIT_HOSTS:
+        url = f"{host}/r/{subreddit}/{sort}.json"
+        # до 3 попыток на каждый домен (на случай 429)
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=HEADERS,
+                                    params=params, timeout=30)
+                if resp.status_code == 429:
+                    # Reddit просит подождать — ждём и пробуем снова
+                    wait = int(resp.headers.get("Retry-After", 5))
+                    logger.warning("429 от %s, ждём %s сек", host, wait)
+                    time.sleep(wait + 1)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return [c["data"] for c in data["data"]["children"]]
+            except Exception as e:
+                last_error = e
+                logger.warning("Не вышло с %s: %s", host, e)
+                break  # этот домен не отвечает — пробуем следующий
+
+    # обычные запросы заблокированы — пробуем настоящий браузер
+    logger.warning("Все зеркала вернули блок, пробуем через Playwright…")
+    try:
+        return _fetch_via_browser(subreddit, sort, period)
+    except Exception as e:
+        raise RuntimeError(
+            f"Reddit заблокировал и обычные запросы, и браузер. Ошибка: {e}"
+        )
 
 
 def _extract_media_from_post(post: dict) -> list:
@@ -145,6 +241,7 @@ def _download_video(post_url: str) -> str | None:
         "format": "bv*+ba/b" if _has_ffmpeg() else "b",
         "merge_output_format": "mp4",
         "max_filesize": MAX_FILE_SIZE,
+        "http_headers": HEADERS,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

@@ -33,3 +33,20 @@ MAX_FILE_SIZE = 50 * 1024 * 1024
 # Отдельный лимит на фото через send_photo (~10 МБ).
 # Файлы крупнее шлём как документ, чтобы Telegram не отверг их.
 MAX_PHOTO_SIZE = 10 * 1024 * 1024
+
+# --- Reddit ---
+# User-Agent ОБЯЗАТЕЛЕН и должен быть осмысленным, иначе Reddit режет анонимные запросы.
+# Формат, который рекомендует Reddit: platform:appname:version (by /u/username)
+REDDIT_USER_AGENT = "python:mediabot:1.0 (by /u/Upset_Magazine_9974)"
+
+# Сколько постов забирать за один проход
+REDDIT_LIMIT = 50
+
+# Какую ленту брать: new / hot / top
+# Дефолтная лента, если у сайта не задана
+REDDIT_DEFAULT_SORT = "new"
+REDDIT_DEFAULT_PERIOD = "day"
+
+# Папка для временных видеофайлов
+import tempfile as _tempfile
+REDDIT_TMP = _tempfile.gettempdir()

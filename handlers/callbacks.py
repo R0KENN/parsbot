@@ -3,10 +3,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 from keyboards.inline import (
-    main_menu, sites_list, back_button, site_menu, confirm_delete
+    main_menu, sites_list, back_button, site_menu, confirm_delete,
+    sort_choice, period_choice
 )
 from handlers.commands import AddSite
-from services import storage
+from services import storage, reddit
 from services.scheduler import schedule_site, run_site_check, unschedule_site
 
 router = Router()
@@ -27,6 +28,27 @@ async def add_site(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
+async def _finish_add(call, state):
+    """Сохраняет сайт из данных FSM и заводит расписание."""
+    data = await state.get_data()
+    url = data["url"]
+    hours = data["hours"]
+    sort = data.get("sort", "new")
+    period = data.get("period", "day")
+
+    site_id = storage.add_site(call.from_user.id, url, hours, sort, period)
+    schedule_site(call.bot, call.from_user.id, site_id, hours)
+    await state.clear()
+
+    if reddit.is_reddit_url(url):
+        extra = f"\nЛента: {sort}" + (f" ({period})" if sort == "top" else "")
+    else:
+        extra = ""
+    await call.message.edit_text(
+        f"✅ Добавлено!\nПроверка каждые {hours} ч.{extra}",
+        reply_markup=main_menu())
+
+
 @router.callback_query(F.data.startswith("hours_"))
 async def set_hours(call: CallbackQuery, state: FSMContext):
     hours = int(call.data.split("_")[1])
@@ -35,14 +57,37 @@ async def set_hours(call: CallbackQuery, state: FSMContext):
     if not url:
         await call.answer("Сначала добавь ссылку", show_alert=True)
         return
+    await state.update_data(hours=hours)
 
-    site_id = storage.add_site(call.from_user.id, url, hours)
-    schedule_site(call.bot, call.from_user.id, site_id, hours)
+    # Для Reddit спрашиваем тип ленты, для обычных сайтов — сразу сохраняем
+    if reddit.is_reddit_url(url):
+        await state.set_state(AddSite.waiting_sort)
+        await call.message.edit_text(
+            "📊 Какую ленту отслеживать?", reply_markup=sort_choice())
+    else:
+        await _finish_add(call, state)
+    await call.answer()
 
-    await state.clear()
-    await call.message.edit_text(
-        f"✅ Сайт добавлен!\nПроверка каждые {hours} ч.",
-        reply_markup=main_menu())
+
+@router.callback_query(F.data.startswith("sort_"))
+async def set_sort(call: CallbackQuery, state: FSMContext):
+    sort = call.data.split("_")[1]   # new / hot / top
+    await state.update_data(sort=sort)
+
+    if sort == "top":
+        await state.set_state(AddSite.waiting_period)
+        await call.message.edit_text(
+            "📅 За какой период брать топ?", reply_markup=period_choice())
+    else:
+        await _finish_add(call, state)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("period_"))
+async def set_period(call: CallbackQuery, state: FSMContext):
+    period = call.data.split("_")[1]  # hour/day/week/month/year/all
+    await state.update_data(period=period)
+    await _finish_add(call, state)
     await call.answer()
 
 
@@ -66,13 +111,20 @@ async def open_site(call: CallbackQuery):
     if site is None:
         await call.answer("Сайт не найден", show_alert=True)
         return
-    await call.message.edit_text(
-        f"⚙️ Настройки сайта:\n\n"
+
+    info = (
+        f"⚙️ Настройки:\n\n"
         f"🔗 {site['url']}\n"
         f"⏱ Проверка каждые {site['hours']} ч\n"
-        f"📦 Скачано медиа: {len(site['seen'])}",
-        reply_markup=site_menu(site_id),
+        f"📦 Скачано медиа: {len(site['seen'])}"
     )
+    if reddit.is_reddit_url(site["url"]):
+        sort = site.get("sort", "new")
+        info += f"\n📊 Лента: {sort}"
+        if sort == "top":
+            info += f" ({site.get('period', 'day')})"
+
+    await call.message.edit_text(info, reply_markup=site_menu(site_id))
     await call.answer()
 
 

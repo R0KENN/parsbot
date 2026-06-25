@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import tempfile
@@ -19,16 +20,14 @@ IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 VIDEO_EXT = (".mp4", ".webm", ".mov")
 MEDIA_EXT = IMAGE_EXT + VIDEO_EXT
 
-# Слова, по которым видно, что это миниатюра, а не оригинал
-_THUMB_HINTS = ("thumb", "icon", "logo", "avatar", "sprite", "/small", "_small", "preview")
-
-# Сколько ждать появления оригинала после клика (мс)
-_CLICK_WAIT_MS = 8000
+# Суффикс размера в имени превью: ..._300px.jpg, ..._150px.png и т.п.
+# Убираем его, чтобы получить ссылку на оригинал.
+_SIZE_SUFFIX_RE = re.compile(r"_\d+px(?=\.[a-zA-Z0-9]+$)")
 
 
 def _robots_allowed(url: str) -> bool:
     """
-    Проверяем robots.txt. Логика:
+    Проверяем robots.txt:
     - файла нет (404) или он пустой -> разрешено;
     - файл есть -> уважаем его правила;
     - сервер недоступен / иная ошибка -> разрешено.
@@ -49,149 +48,79 @@ def _robots_allowed(url: str) -> bool:
         return True
 
 
-def _looks_like_thumb(url: str) -> bool:
-    low = url.lower()
-    return any(hint in low for hint in _THUMB_HINTS)
-
-
-def _is_media_url(url: str) -> bool:
-    return url.lower().split("?")[0].endswith(MEDIA_EXT)
-
-
-def _scroll_to_bottom(page):
-    """Прокручивает страницу до конца, чтобы подгрузились все превью."""
-    prev_height = 0
-    for _ in range(50):  # предохранитель от бесконечного скролла
-        page.mouse.wheel(0, 20000)
-        page.wait_for_timeout(1500)
-        height = page.evaluate("document.body.scrollHeight")
-        if height == prev_height:
-            break
-        prev_height = height
-
-
-def _collect_thumb_selectors(page) -> int:
+def _thumb_to_original(url: str) -> str:
     """
-    Возвращает количество кликабельных превью на странице.
-    Используем селектор, который ловит и <a> с картинками, и сами <img>.
+    Превращает ссылку превью в ссылку оригинала, убирая размерный суффикс.
+    Пример: ..._0072_300px.jpg -> ..._0072.jpg
+    Если суффикса нет — возвращает ссылку как есть.
     """
-    return page.locator("a:has(img), a > img, .gallery img, img").count()
+    base = url.split("?")[0]
+    return _SIZE_SUFFIX_RE.sub("", base)
+
+
+def _render_page_html(page_url: str) -> str:
+    """Открывает страницу в браузере, прокручивает до конца и возвращает HTML."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(page_url, wait_until="networkidle", timeout=60000)
+
+        prev_height = 0
+        for _ in range(50):  # предохранитель от бесконечного скролла
+            page.mouse.wheel(0, 20000)
+            page.wait_for_timeout(1500)
+            height = page.evaluate("document.body.scrollHeight")
+            if height == prev_height:
+                break
+            prev_height = height
+
+        html = page.content()
+        browser.close()
+        return html
 
 
 def find_media_urls(page_url: str) -> list:
     """
-    Открывает галерею в браузере, кликает по каждому превью
-    и перехватывает URL появившегося полноразмерного фото/видео.
+    Собирает превью со страницы галереи и преобразует их в ссылки
+    на оригиналы, убирая размерный суффикс из имени файла.
     """
     if not _robots_allowed(page_url):
         raise PermissionError("robots.txt запрещает доступ к этой странице")
 
-    found_urls = []
+    html = _render_page_html(page_url)
+    soup = BeautifulSoup(html, "html.parser")
+
+    urls = []
     seen = set()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_page(user_agent=HEADERS["User-Agent"])
+    for img in soup.find_all("img"):
+        # источник превью может лежать в разных атрибутах
+        src = None
+        for attr in ("src", "data-src", "data-original", "data-lazy-src"):
+            val = img.get(attr)
+            if val and val.split("?")[0].lower().endswith(IMAGE_EXT):
+                src = val
+                break
+        if not src:
+            continue
 
-        # --- Перехват сети: ловим все медиа-ответы, которые грузит браузер ---
-        captured = []
+        full_thumb = urljoin(page_url, src)
+        original = _thumb_to_original(full_thumb)
 
-        def _on_response(response):
-            url = response.url
-            ctype = response.headers.get("content-type", "")
-            is_media = (
-                ctype.startswith("image/")
-                or ctype.startswith("video/")
-                or _is_media_url(url)
-            )
-            if is_media and not _looks_like_thumb(url):
-                captured.append(url)
+        if original not in seen:
+            seen.add(original)
+            urls.append(original)
 
-        context.on("response", _on_response)
+    # На всякий случай добавим прямые видео со страницы
+    for tag in soup.find_all(["video", "source"]):
+        src = tag.get("src")
+        if src:
+            v = urljoin(page_url, src)
+            if v.split("?")[0].lower().endswith(VIDEO_EXT) and v not in seen:
+                seen.add(v)
+                urls.append(v)
 
-        context.goto(page_url, wait_until="networkidle", timeout=60000)
-        _scroll_to_bottom(context)
-
-        # Все превью на странице
-        thumbs = context.locator("a:has(img), .gallery a, .thumb, img")
-        count = thumbs.count()
-        logger.info("Найдено превью на странице: %s", count)
-
-        if MAX_FILES_PER_RUN:
-            count = min(count, MAX_FILES_PER_RUN)
-
-        for i in range(count):
-            try:
-                # запоминаем длину буфера до клика, чтобы взять только новое
-                before = len(captured)
-
-                thumb = thumbs.nth(i)
-                thumb.scroll_into_view_if_needed(timeout=5000)
-                thumb.click(timeout=5000)
-
-                # ждём, пока браузер подгрузит оригинал
-                context.wait_for_timeout(_CLICK_WAIT_MS // 4)
-
-                # 1) пробуем взять то, что реально загрузилось по сети
-                new_loads = captured[before:]
-                original = None
-                if new_loads:
-                    # самый "тяжёлый" по URL обычно и есть оригинал
-                    original = max(new_loads, key=len)
-
-                # 2) запасной вариант — крупное изображение в лайтбоксе
-                if not original:
-                    original = _read_lightbox_image(context, page_url)
-
-                if original:
-                    full = urljoin(page_url, original)
-                    if full not in seen:
-                        seen.add(full)
-                        found_urls.append(full)
-
-                # закрываем лайтбокс, если открылся (Esc обычно закрывает)
-                context.keyboard.press("Escape")
-                context.wait_for_timeout(500)
-
-            except Exception:
-                logger.exception("Ошибка при клике по превью #%s", i)
-                # пытаемся восстановиться: закрыть возможный лайтбокс
-                try:
-                    context.keyboard.press("Escape")
-                except Exception:
-                    pass
-                continue
-
-            time.sleep(DOWNLOAD_DELAY)
-
-        browser.close()
-
-    return found_urls
-
-
-def _read_lightbox_image(page, page_url: str) -> str | None:
-    """
-    Запасной способ: читает src самого крупного изображения в открытом
-    лайтбоксе/модалке, если перехват сети ничего не дал.
-    """
-    try:
-        html = page.content()
-        soup = BeautifulSoup(html, "html.parser")
-
-        candidates = []
-        for img in soup.find_all("img"):
-            for attr in ("src", "data-src", "data-original", "data-full",
-                         "data-zoom-image", "data-large"):
-                src = img.get(attr)
-                if src and _is_media_url(src) and not _looks_like_thumb(src):
-                    candidates.append(urljoin(page_url, src))
-
-        if not candidates:
-            return None
-        return max(candidates, key=len)
-    except Exception:
-        logger.exception("Ошибка при чтении лайтбокса")
-        return None
+    return urls
 
 
 def download_file(url: str) -> str | None:

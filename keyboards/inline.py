@@ -52,3 +52,25 @@ def back_button() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="⬅️ Назад", callback_data="back_main")
     return kb.as_markup()
+
+def sort_choice() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🆕 New", callback_data="sort_new")
+    kb.button(text="🔥 Hot", callback_data="sort_hot")
+    kb.button(text="🏆 Top", callback_data="sort_top")
+    kb.button(text="⬅️ Отмена", callback_data="back_main")
+    kb.adjust(3)
+    return kb.as_markup()
+
+
+def period_choice() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="За час", callback_data="period_hour")
+    kb.button(text="За день", callback_data="period_day")
+    kb.button(text="За неделю", callback_data="period_week")
+    kb.button(text="За месяц", callback_data="period_month")
+    kb.button(text="За год", callback_data="period_year")
+    kb.button(text="За всё время", callback_data="period_all")
+    kb.button(text="⬅️ Отмена", callback_data="back_main")
+    kb.adjust(2)
+    return kb.as_markup()

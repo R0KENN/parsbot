@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE
-from services import storage, scraper
+from services import storage, scraper, reddit
 
 scheduler = AsyncIOScheduler()
 
@@ -45,8 +45,13 @@ async def run_site_check(bot, user_id: int, site_id: str):
         return
 
     try:
-        new_media = await asyncio.to_thread(
-            scraper.fetch_new_media, site["url"], site["seen"])
+        if reddit.is_reddit_url(site["url"]):
+            new_media = await asyncio.to_thread(
+                reddit.fetch_new_media, site["url"], site["seen"],
+                site.get("sort", "new"), site.get("period", "day"))
+        else:
+            new_media = await asyncio.to_thread(
+                scraper.fetch_new_media, site["url"], site["seen"])
     except PermissionError:
         await bot.send_message(
             user_id, f"⚠️ robots.txt запрещает доступ к {site['url']}")

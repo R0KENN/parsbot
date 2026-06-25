@@ -23,7 +23,12 @@ def _migrate(data: dict) -> bool:
     changed = False
     for user in data.get("users", {}).values():
         for site in user.get("sites", []):
-            if "id" not in site:
+            if "sort" not in site:
+                site["sort"] = "new"
+                changed = True
+            if "period" not in site:
+                site["period"] = "day"
+                changed = True
                 site["id"] = uuid.uuid4().hex
                 changed = True
     return changed
@@ -54,8 +59,9 @@ def get_user(user_id: int) -> dict:
         return data["users"][user_id]
 
 
-def add_site(user_id: int, url: str, hours: int) -> str:
-    """Добавляет сайт и возвращает его id."""
+def add_site(user_id: int, url: str, hours: int,
+             sort: str = "new", period: str = "day") -> str:
+    """Добавляет сайт/сабреддит и возвращает его id."""
     user_id = str(user_id)
     site_id = uuid.uuid4().hex
     with _lock:
@@ -65,6 +71,8 @@ def add_site(user_id: int, url: str, hours: int) -> str:
             "id": site_id,
             "url": url,
             "hours": hours,
+            "sort": sort,        # new / hot / top — для reddit
+            "period": period,    # hour/day/week/month/year/all — для top
             "seen": [],
         })
         _save(data)

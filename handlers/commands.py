@@ -12,6 +12,8 @@ router = Router()
 class AddSite(StatesGroup):
     waiting_url = State()
     waiting_hours = State()
+    waiting_sort = State()
+    waiting_period = State()
 
 
 @router.message(Command("start"))

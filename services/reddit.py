@@ -9,7 +9,7 @@ import requests
 from playwright.sync_api import sync_playwright
 
 from config import (
-    REDDIT_USER_AGENT, REDDIT_LIMIT,
+    REDDIT_LIMIT,
     REDDIT_DEFAULT_SORT, REDDIT_DEFAULT_PERIOD,
     MAX_FILE_SIZE,
 )
@@ -185,7 +185,7 @@ def _extract_media_from_post(post: dict) -> list:
                     continue
                 link = link.replace("&amp;", "&")
                 items.append({
-                    "id": f"{post_id}_{i}",
+                    "id": f"{post_id}_{mid}",
                     "type": "photo",
                     "url": link,
                     "permalink": permalink,

@@ -42,7 +42,7 @@ def _robots_allowed(url: str) -> bool:
         if resp.status_code == 200:
             rp = robotparser.RobotFileParser()
             rp.parse(resp.text.splitlines())
-            return rp.can_fetch(HEADERS["User-Agent"], url)
+            return rp.can_fetch("MediaBot", url)
         return True
     except Exception:
         return True

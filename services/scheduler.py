@@ -38,6 +38,16 @@ async def _send_one(bot, user_id, path):
             return False
 
 
+def _progress_bar(done: int, total: int, width: int = 10) -> str:
+    """Рисует текстовый прогресс-бар вида ▓▓▓▓░░░░░░ 40%."""
+    if total <= 0:
+        return ""
+    ratio = done / total
+    filled = int(ratio * width)
+    bar = "▓" * filled + "░" * (width - filled)
+    return f"{bar} {int(ratio * 100)}%"
+
+
 async def run_site_check(bot, user_id: int, site_id: str):
     """Проверяет один сайт и отправляет новые медиа пользователю."""
     site = storage.get_site(user_id, site_id)
@@ -64,10 +74,18 @@ async def run_site_check(bot, user_id: int, site_id: str):
         return
 
     total = len(new_media)
-    await bot.send_message(
-        user_id, f"📥 Найдено {total} новых медиа на {site['url']}. Отправляю…")
+
+    # одно сообщение, которое будем редактировать как живой прогресс
+    status = await bot.send_message(
+        user_id,
+        f"📥 {site['url']}\n"
+        f"Найдено {total} новых медиа.\n"
+        f"{_progress_bar(0, total)}\n"
+        f"Отправлено 0 из {total}"
+    )
 
     sent_count = 0
+    last_text = None
     for i, (url, path) in enumerate(new_media, start=1):
         ok = await _send_one(bot, user_id, path)
         if ok:
@@ -78,14 +96,37 @@ async def run_site_check(bot, user_id: int, site_id: str):
         if os.path.exists(path):
             os.remove(path)
 
-        if i % PROGRESS_EVERY == 0 and i < total:
-            await bot.send_message(user_id, f"… {i} из {total}")
+        # обновляем прогресс не на каждом файле, а раз в PROGRESS_EVERY,
+        # и обязательно на самом последнем — иначе упрёмся во flood limit
+        if i % PROGRESS_EVERY == 0 or i == total:
+            new_text = (
+                f"📥 {site['url']}\n"
+                f"Найдено {total} новых медиа.\n"
+                f"{_progress_bar(i, total)}\n"
+                f"Отправлено {sent_count} из {i}"
+            )
+            # Telegram ругается, если текст не изменился — пропускаем такой случай
+            if new_text != last_text:
+                try:
+                    await status.edit_text(new_text)
+                    last_text = new_text
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except Exception:
+                    pass
 
         await asyncio.sleep(SEND_DELAY)
 
-    await bot.send_message(
-        user_id,
-        f"✅ Готово! Отправлено {sent_count} из {total} с {site['url']}")
+    # финальное состояние сообщения
+    try:
+        await status.edit_text(
+            f"✅ Готово!\n"
+            f"📥 {site['url']}\n"
+            f"{_progress_bar(total, total)}\n"
+            f"Отправлено {sent_count} из {total}"
+        )
+    except Exception:
+        pass
 
 
 def schedule_site(bot: Bot, user_id: int, site_id: str, hours: int):

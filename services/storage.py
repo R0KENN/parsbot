@@ -17,19 +17,23 @@ def _ensure_file():
 
 def _migrate(data: dict) -> bool:
     """
-    Добавляет поле id сайтам, у которых его ещё нет (старый формат).
-    Возвращает True, если что-то изменилось и данные надо сохранить.
+    Приводит старые записи к актуальному формату: добавляет недостающие
+    поля id / sort / period / seen. Возвращает True, если что-то изменилось.
     """
     changed = False
     for user in data.get("users", {}).values():
         for site in user.get("sites", []):
+            if "id" not in site:
+                site["id"] = uuid.uuid4().hex
+                changed = True
             if "sort" not in site:
                 site["sort"] = "new"
                 changed = True
             if "period" not in site:
                 site["period"] = "day"
                 changed = True
-                site["id"] = uuid.uuid4().hex
+            if "seen" not in site:
+                site["seen"] = []
                 changed = True
     return changed
 
@@ -111,7 +115,7 @@ def mark_seen(user_id: int, site_id: str, urls: list):
         for site in sites:
             if site["id"] != site_id:
                 continue
-            existing = site["seen"]
+            existing = site.get("seen", [])
             existing_set = set(existing)
             for u in urls:
                 if u not in existing_set:

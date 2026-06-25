@@ -2,10 +2,12 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
-from keyboards.inline import main_menu, sites_list, back_button
+from keyboards.inline import (
+    main_menu, sites_list, back_button, site_menu, confirm_delete
+)
 from handlers.commands import AddSite
 from services import storage
-from services.scheduler import schedule_site, run_site_check
+from services.scheduler import schedule_site, run_site_check, reschedule_user
 
 router = Router()
 
@@ -57,10 +59,58 @@ async def list_sites_cb(call: CallbackQuery):
     await call.answer()
 
 
+# Открыть карточку одного сайта
+@router.callback_query(F.data.startswith("open_"))
+async def open_site(call: CallbackQuery):
+    index = int(call.data.split("_")[1])
+    sites = storage.list_sites(call.from_user.id)
+    if index >= len(sites):
+        await call.answer("Сайт не найден", show_alert=True)
+        return
+    site = sites[index]
+    await call.message.edit_text(
+        f"⚙️ Настройки сайта:\n\n"
+        f"🔗 {site['url']}\n"
+        f"⏱ Проверка каждые {site['hours']} ч\n"
+        f"📦 Скачано медиа: {len(site['seen'])}",
+        reply_markup=site_menu(index),
+    )
+    await call.answer()
+
+
+# Проверить один конкретный сайт
+@router.callback_query(F.data.startswith("checkone_"))
+async def check_one(call: CallbackQuery):
+    index = int(call.data.split("_")[1])
+    sites = storage.list_sites(call.from_user.id)
+    if index >= len(sites):
+        await call.answer("Сайт не найден", show_alert=True)
+        return
+    await call.answer("🔄 Проверяю этот сайт…")
+    await run_site_check(call.bot, call.from_user.id, index)
+
+
+# Спросить подтверждение удаления
+@router.callback_query(F.data.startswith("askdel_"))
+async def ask_delete(call: CallbackQuery):
+    index = int(call.data.split("_")[1])
+    sites = storage.list_sites(call.from_user.id)
+    if index >= len(sites):
+        await call.answer("Сайт не найден", show_alert=True)
+        return
+    await call.message.edit_text(
+        f"❓ Удалить этот сайт?\n\n{sites[index]['url']}",
+        reply_markup=confirm_delete(index),
+    )
+    await call.answer()
+
+
+# Подтверждённое удаление
 @router.callback_query(F.data.startswith("del_"))
 async def delete_site(call: CallbackQuery):
     index = int(call.data.split("_")[1])
     storage.remove_site(call.from_user.id, index)
+    reschedule_user(call.bot, call.from_user.id)   # <-- новая строка
     sites = storage.list_sites(call.from_user.id)
     if sites:
         await call.message.edit_text(

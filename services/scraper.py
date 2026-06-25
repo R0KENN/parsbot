@@ -3,6 +3,7 @@ import time
 import tempfile
 import urllib.robotparser as robotparser
 from urllib.parse import urljoin, urlparse
+from playwright.sync_api import sync_playwright
 
 import requests
 from bs4 import BeautifulSoup
@@ -45,19 +46,40 @@ def _robots_allowed(url: str) -> bool:
         return True
 
 
+def _render_page_html(page_url: str) -> str:
+    """Открывает страницу в браузере, прокручивает до конца и возвращает HTML."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(user_agent=HEADERS["User-Agent"])
+        page.goto(page_url, wait_until="networkidle", timeout=60000)
+
+        # Прокручиваем вниз, пока высота страницы не перестанет расти
+        prev_height = 0
+        for _ in range(50):  # предохранитель от бесконечного скролла
+            page.mouse.wheel(0, 20000)
+            page.wait_for_timeout(1500)  # ждём подгрузки
+            height = page.evaluate("document.body.scrollHeight")
+            if height == prev_height:
+                break
+            prev_height = height
+
+        html = page.content()
+        browser.close()
+        return html
+
+
 def find_media_urls(page_url: str) -> list:
-    """Находит ссылки на изображения и видео на странице."""
+    """Находит ссылки на изображения и видео на полностью прогруженной странице."""
     if not _robots_allowed(page_url):
         raise PermissionError("robots.txt запрещает доступ к этой странице")
 
-    resp = requests.get(page_url, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html = _render_page_html(page_url)
+    soup = BeautifulSoup(html, "html.parser")
 
     urls = set()
 
     for img in soup.find_all("img"):
-        for attr in ("src", "data-src"):
+        for attr in ("src", "data-src", "data-original", "data-lazy-src"):
             src = img.get(attr)
             if src:
                 full = urljoin(page_url, src)
@@ -71,7 +93,6 @@ def find_media_urls(page_url: str) -> list:
             if full.lower().split("?")[0].endswith(VIDEO_EXT):
                 urls.add(full)
 
-    # ссылки <a> на файлы
     for a in soup.find_all("a"):
         href = a.get("href")
         if href:

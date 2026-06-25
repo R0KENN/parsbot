@@ -1,3 +1,15 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан. Создай файл .env с BOT_TOKEN=...")
+
+# Путь к файлу-хранилищу
+STORAGE_PATH = os.path.join(os.path.dirname(__file__), "data", "storage.json")
+
 # Снимаем жёсткий лимит на количество файлов за проход.
 # None = скачивать всё, что найдено.
 MAX_FILES_PER_RUN = None

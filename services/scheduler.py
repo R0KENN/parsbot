@@ -38,7 +38,8 @@ async def run_site_check(bot, user_id: int, index: int):
     site = sites[index]
 
     try:
-        new_media = scraper.fetch_new_media(site["url"], site["seen"])
+        new_media = await asyncio.to_thread(
+        scraper.fetch_new_media, site["url"], site["seen"])
     except PermissionError:
         await bot.send_message(
             user_id, f"⚠️ robots.txt запрещает доступ к {site['url']}")
@@ -88,6 +89,19 @@ def schedule_site(bot: Bot, user_id: int, index: int, hours: int):
         replace_existing=True,
     )
 
+def unschedule_all_for_user(bot, user_id: int):
+    """Снимает все задачи пользователя (перед пересозданием после сдвига индексов)."""
+    for job in scheduler.get_jobs():
+        if job.id.startswith(f"{user_id}_"):
+            scheduler.remove_job(job.id)
+
+
+def reschedule_user(bot, user_id: int):
+    """Пересоздаёт задачи пользователя с актуальными индексами."""
+    unschedule_all_for_user(bot, user_id)
+    sites = storage.list_sites(user_id)
+    for i, site in enumerate(sites):
+        schedule_site(bot, user_id, i, site["hours"])
 
 def reschedule_all(bot: Bot):
     """При старте бота восстанавливаем задачи из хранилища."""

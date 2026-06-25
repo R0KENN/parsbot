@@ -2,14 +2,21 @@ import asyncio
 import os
 
 from aiogram import Bot
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
 from aiogram.exceptions import TelegramRetryAfter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
-from config import SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE
+from config import (
+    SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE, ALBUM_SIZE, JOBS_DB_PATH,
+)
 from services import storage, scraper, reddit
 
-scheduler = AsyncIOScheduler()
+# Задачи хранятся в SQLite — переживают перезапуск бота.
+os.makedirs(os.path.dirname(JOBS_DB_PATH), exist_ok=True)
+scheduler = AsyncIOScheduler(
+    jobstores={"default": SQLAlchemyJobStore(url=f"sqlite:///{JOBS_DB_PATH}")}
+)
 
 VIDEO_EXT = (".mp4", ".webm", ".mov")
 
@@ -48,6 +55,35 @@ def _progress_bar(done: int, total: int, width: int = 10) -> str:
     return f"{bar} {int(ratio * 100)}%"
 
 
+async def _send_album(bot, user_id, batch):
+    """
+    Шлёт пачку медиа одним альбомом (до ALBUM_SIZE штук).
+    batch — список путей к файлам. Возвращает кол-во успешно отправленных.
+    """
+    media = []
+    for path in batch:
+        file = FSInputFile(path)
+        if path.lower().endswith(VIDEO_EXT):
+            media.append(InputMediaVideo(media=file))
+        else:
+            media.append(InputMediaPhoto(media=file))
+
+    while True:
+        try:
+            await bot.send_media_group(user_id, media)
+            return len(batch)
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except Exception:
+            # альбом не ушёл целиком — пробуем по одному, чтобы не терять всё
+            ok = 0
+            for path in batch:
+                if await _send_one(bot, user_id, path):
+                    ok += 1
+                await asyncio.sleep(SEND_DELAY)
+            return ok
+
+
 async def run_site_check(bot, user_id: int, site_id: str):
     """Проверяет один сайт и отправляет новые медиа пользователю."""
     site = storage.get_site(user_id, site_id)
@@ -75,7 +111,6 @@ async def run_site_check(bot, user_id: int, site_id: str):
 
     total = len(new_media)
 
-    # одно сообщение, которое будем редактировать как живой прогресс
     status = await bot.send_message(
         user_id,
         f"📥 {site['url']}\n"
@@ -84,61 +119,67 @@ async def run_site_check(bot, user_id: int, site_id: str):
         f"Отправлено 0 из {total}"
     )
 
-    # закрепляем сообщение прогресса на время загрузки.
-    # disable_notification=True — чтобы закрепление не слало звук/уведомление.
     try:
         await bot.pin_chat_message(
             user_id, status.message_id, disable_notification=True)
         pinned = True
     except Exception:
-        # если закрепить не вышло (нет прав/ограничение) — не критично
         pinned = False
 
     sent_count = 0
+    processed = 0
     last_text = None
-    for i, (url, path) in enumerate(new_media, start=1):
-        ok = await _send_one(bot, user_id, path)
-        if ok:
-            sent_count += 1
-            # отмечаем сразу, чтобы при сбое не качать заново
+
+    # шлём альбомами по ALBUM_SIZE
+    for start in range(0, total, ALBUM_SIZE):
+        chunk = new_media[start:start + ALBUM_SIZE]
+        paths = [p for (_url, p) in chunk]
+
+        ok = await _send_album(bot, user_id, paths)
+        sent_count += ok
+        processed += len(chunk)
+
+        # отмечаем отправленными ровно столько, сколько ушло
+        for (url, _p) in chunk[:ok]:
             storage.mark_seen(user_id, site_id, [url])
 
-        if os.path.exists(path):
-            os.remove(path)
+        # чистим временные файлы пачки
+        for (_url, p) in chunk:
+            if os.path.exists(p):
+                os.remove(p)
 
-        # обновляем прогресс не на каждом файле, а раз в PROGRESS_EVERY,
-        # и обязательно на самом последнем — иначе упрёмся во flood limit
-        if i % PROGRESS_EVERY == 0 or i == total:
-            new_text = (
-                f"📥 {site['url']}\n"
-                f"Найдено {total} новых медиа.\n"
-                f"{_progress_bar(i, total)}\n"
-                f"Отправлено {sent_count} из {i}"
-            )
-            # Telegram ругается, если текст не изменился — пропускаем такой случай
-            if new_text != last_text:
-                try:
-                    await status.edit_text(new_text)
-                    last_text = new_text
-                except TelegramRetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 1)
-                except Exception:
-                    pass
+        # обновляем прогресс
+        new_text = (
+            f"📥 {site['url']}\n"
+            f"Найдено {total} новых медиа.\n"
+            f"{_progress_bar(processed, total)}\n"
+            f"Отправлено {sent_count} из {processed}"
+        )
+        if new_text != last_text:
+            try:
+                await status.edit_text(new_text)
+                last_text = new_text
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception:
+                pass
 
         await asyncio.sleep(SEND_DELAY)
 
-    # финальное состояние сообщения
+    skipped = total - sent_count
+    final = (
+        f"✅ Готово!\n"
+        f"📥 {site['url']}\n"
+        f"{_progress_bar(total, total)}\n"
+        f"Отправлено {sent_count} из {total}"
+    )
+    if skipped > 0:
+        final += f"\n⚠️ Пропущено {skipped} (слишком большие или ошибка)"
     try:
-        await status.edit_text(
-            f"✅ Готово!\n"
-            f"📥 {site['url']}\n"
-            f"{_progress_bar(total, total)}\n"
-            f"Отправлено {sent_count} из {total}"
-        )
+        await status.edit_text(final)
     except Exception:
         pass
 
-    # открепляем — выполнение завершено, закрепление больше не нужно
     if pinned:
         try:
             await bot.unpin_chat_message(user_id, status.message_id)
@@ -154,6 +195,8 @@ def schedule_site(bot: Bot, user_id: int, site_id: str, hours: int):
         args=[bot, user_id, site_id],
         id=job_id,
         replace_existing=True,
+        max_instances=1,   # не запускать вторую проверку, пока идёт первая
+        coalesce=True,     # пропущенные срабатывания объединять в одно
     )
 
 

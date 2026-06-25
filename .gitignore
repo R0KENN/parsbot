@@ -7,3 +7,4 @@ venv/
 reddit_state.json
 reddit_cookies.txt
 cookies.txt
+data/

@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 from config import (
     REDDIT_LIMIT,
     REDDIT_DEFAULT_SORT, REDDIT_DEFAULT_PERIOD,
-    MAX_FILE_SIZE,
+    MAX_FILE_SIZE, REDDIT_COOKIES_PATH,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,8 @@ def _fetch_listing(subreddit: str, sort: str, period: str) -> list:
         return _fetch_via_browser(subreddit, sort, period)
     except Exception as e:
         raise RuntimeError(
-            f"Reddit заблокировал и обычные запросы, и браузер. Ошибка: {e}"
+            f"Reddit заблокировал и обычные запросы (последняя ошибка: "
+            f"{last_error}), и браузер. Ошибка браузера: {e}"
         )
 
 
@@ -267,6 +268,9 @@ def _download_video(post_url: str) -> str | None:
         "merge_output_format": "mp4",
         "max_filesize": MAX_FILE_SIZE,
         "http_headers": HEADERS,
+        # cookies подхватываются, только если файл существует
+        **({"cookiefile": REDDIT_COOKIES_PATH}
+           if os.path.exists(REDDIT_COOKIES_PATH) else {}),
         # берём cookies прямо из браузера, где вы залогинены в Reddit.
         # это обходит требование авторизации и ошибку 403 Blocked.
         "cookiefile": os.path.join(

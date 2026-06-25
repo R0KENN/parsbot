@@ -50,3 +50,12 @@ REDDIT_DEFAULT_PERIOD = "day"
 # Папка для временных видеофайлов
 import tempfile as _tempfile
 REDDIT_TMP = _tempfile.gettempdir()
+
+# Путь к базе планировщика (чтобы задачи переживали перезапуск бота)
+JOBS_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "jobs.sqlite")
+
+# Путь к cookies для yt-dlp (видео Reddit). Если файла нет — качаем без него.
+REDDIT_COOKIES_PATH = os.path.join(os.path.dirname(__file__), "reddit_cookies.txt")
+
+# Сколько медиа можно слать одним альбомом (Telegram-лимит = 10)
+ALBUM_SIZE = 10

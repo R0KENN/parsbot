@@ -68,44 +68,82 @@ def _render_page_html(page_url: str) -> str:
         return html
 
 
+def _extract_full_image(page_url: str) -> str | None:
+    """Заходит на страницу картинки и возвращает ссылку на полноразмерное изображение."""
+    try:
+        resp = requests.get(page_url, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Берём самое большое изображение на странице:
+        # сначала пробуем типичные места, где лежит оригинал.
+        candidates = []
+
+        # 1) ссылка <a> на сам файл изображения
+        for a in soup.find_all("a"):
+            href = a.get("href", "")
+            if href.lower().split("?")[0].endswith(IMAGE_EXT):
+                candidates.append(urljoin(page_url, href))
+
+        # 2) все <img> на странице
+        for img in soup.find_all("img"):
+            for attr in ("src", "data-src", "data-original", "data-lazy-src"):
+                src = img.get(attr)
+                if src and src.lower().split("?")[0].endswith(IMAGE_EXT):
+                    candidates.append(urljoin(page_url, src))
+
+        if not candidates:
+            return None
+        # эвристика: самый длинный URL часто = оригинал, а не миниатюра.
+        # но обычно первый <a> на файл — это и есть оригинал.
+        return candidates[0]
+    except Exception:
+        return None
+
+
 def find_media_urls(page_url: str) -> list:
-    """Находит ссылки на изображения и видео на полностью прогруженной странице."""
+    """
+    Находит полноразмерные изображения, заходя на страницу каждой картинки.
+    """
     if not _robots_allowed(page_url):
         raise PermissionError("robots.txt запрещает доступ к этой странице")
 
     html = _render_page_html(page_url)
     soup = BeautifulSoup(html, "html.parser")
 
+    # Шаг 1: собираем ссылки на страницы отдельных картинок.
+    page_links = []
+    seen_links = set()
+    for a in soup.find_all("a"):
+        href = a.get("href")
+        if not href:
+            continue
+        full = urljoin(page_url, href)
+        # ссылки на страницы картинок, а НЕ на сами файлы и не на внешние сайты
+        if full.startswith(page_url.split("?")[0].rsplit("/", 1)[0]) \
+                and not full.lower().split("?")[0].endswith(IMAGE_EXT + VIDEO_EXT) \
+                and full not in seen_links:
+            seen_links.add(full)
+            page_links.append(full)
+
+    # Шаг 2: на каждой странице картинки берём полноразмерное изображение.
     urls = []
-    seen = set()  # только для отсева дублей, порядок храним в списке
+    seen = set()
+    for link in page_links:
+        full_img = _extract_full_image(link)
+        if full_img and full_img not in seen:
+            seen.add(full_img)
+            urls.append(full_img)
+        time.sleep(DOWNLOAD_DELAY)  # пауза между заходами на страницы
 
-    def add(u):
-        if u not in seen:
-            seen.add(u)
-            urls.append(u)
-
-    for img in soup.find_all("img"):
-        for attr in ("src", "data-src", "data-original", "data-lazy-src"):
-            src = img.get(attr)
-            if src:
-                full = urljoin(page_url, src)
-                if full.lower().split("?")[0].endswith(IMAGE_EXT):
-                    add(full)
-
+    # Шаг 3: на всякий случай добавим прямые видео со страницы-галереи.
     for tag in soup.find_all(["video", "source"]):
         src = tag.get("src")
         if src:
-            full = urljoin(page_url, src)
-            if full.lower().split("?")[0].endswith(VIDEO_EXT):
-                add(full)
-
-    for a in soup.find_all("a"):
-        href = a.get("href")
-        if href:
-            full = urljoin(page_url, href)
-            clean = full.lower().split("?")[0]
-            if clean.endswith(IMAGE_EXT + VIDEO_EXT):
-                add(full)
+            v = urljoin(page_url, src)
+            if v.lower().split("?")[0].endswith(VIDEO_EXT) and v not in seen:
+                seen.add(v)
+                urls.append(v)
 
     return urls
 

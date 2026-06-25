@@ -76,9 +76,15 @@ def _fetch_via_browser(subreddit: str, sort: str, period: str) -> list:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
+        _state = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                              "reddit_state.json")
+        _has_state = os.path.exists(_state)
+        logger.info("Playwright: файл сессии %s",
+                    "НАЙДЕН" if _has_state else "НЕ найден")
         context = browser.new_context(
             user_agent=HEADERS["User-Agent"],
             locale="en-US",
+            storage_state=_state if _has_state else None,
         )
         page = context.new_page()
         try:
@@ -202,8 +208,20 @@ def _extract_media_from_post(post: dict) -> list:
 
 
 def _download_image(url: str) -> str | None:
+    # Для i.redd.it / preview.redd.it НЕ нужен Referer на reddit.com —
+    # иначе Reddit редиректит на www.reddit.com/media и отдаёт 403.
+    img_headers = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=60, stream=True)
+        resp = requests.get(url, headers=img_headers, timeout=60,
+                            stream=True, allow_redirects=True)
+        # если всё же редиректнуло на страницу-блокировку reddit.com — стоп
+        if "reddit.com/media" in resp.url:
+            logger.warning("Картинка ушла в редирект на media: %s", url)
+            return None
         resp.raise_for_status()
         name = os.path.basename(url.split("?")[0]) or "img.jpg"
         path = os.path.join(tempfile.gettempdir(), f"rd_{name}")

@@ -243,13 +243,20 @@ def _download_image(url: str) -> str | None:
 def _download_video(post_url: str) -> str | None:
     """
     Качает reddit-видео через yt-dlp. Если есть ffmpeg — со звуком,
-    иначе yt-dlp отдаст видео без звука.
+    иначе берём лучший единый прогрессивный формат (часто без звука).
     """
     try:
         import yt_dlp
     except ImportError:
         logger.error("yt-dlp не установлен — видео скачать нельзя")
         return None
+
+    has_ffmpeg = _has_ffmpeg()
+    if not has_ffmpeg:
+        logger.warning(
+            "ffmpeg не найден — reddit-видео может не скачаться или быть без звука. "
+            "Установите ffmpeg для корректной работы."
+        )
 
     out_template = os.path.join(tempfile.gettempdir(), "rd_%(id)s.%(ext)s")
     ydl_opts = {
@@ -260,12 +267,16 @@ def _download_video(post_url: str) -> str | None:
         "merge_output_format": "mp4",
         "max_filesize": MAX_FILE_SIZE,
         "http_headers": HEADERS,
+        # берём cookies прямо из браузера, где вы залогинены в Reddit.
+        # это обходит требование авторизации и ошибку 403 Blocked.
+        "cookiefile": os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "reddit_cookies.txt"
+        ),
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(post_url, download=True)
             path = ydl.prepare_filename(info)
-            # после merge расширение может стать .mp4
             if not os.path.exists(path):
                 base = os.path.splitext(path)[0]
                 for ext in (".mp4", ".mkv", ".webm"):
@@ -274,6 +285,10 @@ def _download_video(post_url: str) -> str | None:
                         break
             if os.path.exists(path) and os.path.getsize(path) <= MAX_FILE_SIZE:
                 return path
+            logger.warning(
+                "Видео не получено или превышает лимит %s МБ: %s",
+                MAX_FILE_SIZE // (1024 * 1024), post_url
+            )
             return None
     except Exception:
         logger.exception("Ошибка скачивания видео: %s", post_url)

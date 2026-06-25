@@ -84,6 +84,16 @@ async def run_site_check(bot, user_id: int, site_id: str):
         f"Отправлено 0 из {total}"
     )
 
+    # закрепляем сообщение прогресса на время загрузки.
+    # disable_notification=True — чтобы закрепление не слало звук/уведомление.
+    try:
+        await bot.pin_chat_message(
+            user_id, status.message_id, disable_notification=True)
+        pinned = True
+    except Exception:
+        # если закрепить не вышло (нет прав/ограничение) — не критично
+        pinned = False
+
     sent_count = 0
     last_text = None
     for i, (url, path) in enumerate(new_media, start=1):
@@ -128,6 +138,12 @@ async def run_site_check(bot, user_id: int, site_id: str):
     except Exception:
         pass
 
+    # открепляем — выполнение завершено, закрепление больше не нужно
+    if pinned:
+        try:
+            await bot.unpin_chat_message(user_id, status.message_id)
+        except Exception:
+            pass
 
 def schedule_site(bot: Bot, user_id: int, site_id: str, hours: int):
     job_id = f"{user_id}_{site_id}"

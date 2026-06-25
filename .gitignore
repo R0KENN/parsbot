@@ -5,4 +5,5 @@ data/storage.json
 venv/
 .venv/
 reddit_state.json
-.env
+reddit_cookies.txt
+cookies.txt

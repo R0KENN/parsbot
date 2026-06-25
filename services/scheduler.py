@@ -1,17 +1,15 @@
-from aiogram import Bot
-from aiogram.types import FSInputFile
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-from services import storage, scraper
-
-scheduler = AsyncIOScheduler()
-
-
 import asyncio
 import os
 
+from aiogram import Bot
+from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramRetryAfter
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 from config import SEND_DELAY, PROGRESS_EVERY
+from services import storage, scraper
+
+scheduler = AsyncIOScheduler()
 
 
 async def _send_one(bot, user_id, path):

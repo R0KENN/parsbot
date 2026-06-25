@@ -4,3 +4,5 @@ __pycache__/
 data/storage.json
 venv/
 .venv/
+reddit_state.json
+.env

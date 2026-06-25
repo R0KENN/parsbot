@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO)
 async def set_commands(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="start", description="Запустить бота / меню"),
+        BotCommand(command="menu", description="Главное меню"),
     ])
 
 

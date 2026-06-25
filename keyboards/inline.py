@@ -13,28 +13,28 @@ def main_menu() -> InlineKeyboardMarkup:
 
 def sites_list(sites: list) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for i, site in enumerate(sites):
+    for site in sites:
         short = site["url"][:30] + ("…" if len(site["url"]) > 30 else "")
         kb.button(text=f"{short} ({site['hours']}ч)",
-                  callback_data=f"open_{i}")
+                  callback_data=f"open_{site['id']}")
     kb.button(text="⬅️ Назад", callback_data="back_main")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def site_menu(index: int) -> InlineKeyboardMarkup:
+def site_menu(site_id: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔄 Проверить сейчас", callback_data=f"checkone_{index}")
-    kb.button(text="🗑 Удалить", callback_data=f"askdel_{index}")
+    kb.button(text="🔄 Проверить сейчас", callback_data=f"checkone_{site_id}")
+    kb.button(text="🗑 Удалить", callback_data=f"askdel_{site_id}")
     kb.button(text="⬅️ К списку", callback_data="list_sites")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def confirm_delete(index: int) -> InlineKeyboardMarkup:
+def confirm_delete(site_id: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Да, удалить", callback_data=f"del_{index}")
-    kb.button(text="❌ Отмена", callback_data=f"open_{index}")
+    kb.button(text="✅ Да, удалить", callback_data=f"del_{site_id}")
+    kb.button(text="❌ Отмена", callback_data=f"open_{site_id}")
     kb.adjust(2)
     return kb.as_markup()
 

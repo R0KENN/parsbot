@@ -6,20 +6,28 @@ from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramRetryAfter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import SEND_DELAY, PROGRESS_EVERY
+from config import SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE
 from services import storage, scraper
 
 scheduler = AsyncIOScheduler()
 
+VIDEO_EXT = (".mp4", ".webm", ".mov")
+
 
 async def _send_one(bot, user_id, path):
     """Отправляет один файл с обработкой flood limit."""
-    file = FSInputFile(path)
-    is_video = path.lower().endswith((".mp4", ".webm", ".mov"))
+    is_video = path.lower().endswith(VIDEO_EXT)
+    # Фото крупнее лимита Telegram отверг бы — шлём документом.
+    too_big_for_photo = (
+        os.path.exists(path) and os.path.getsize(path) > MAX_PHOTO_SIZE
+    )
     while True:
         try:
+            file = FSInputFile(path)
             if is_video:
                 await bot.send_video(user_id, file)
+            elif too_big_for_photo:
+                await bot.send_document(user_id, file)
             else:
                 await bot.send_photo(user_id, file)
             return True
@@ -30,12 +38,11 @@ async def _send_one(bot, user_id, path):
             return False
 
 
-async def run_site_check(bot, user_id: int, index: int):
+async def run_site_check(bot, user_id: int, site_id: str):
     """Проверяет один сайт и отправляет новые медиа пользователю."""
-    sites = storage.list_sites(user_id)
-    if index >= len(sites):
+    site = storage.get_site(user_id, site_id)
+    if site is None:
         return
-    site = sites[index]
 
     try:
         new_media = await asyncio.to_thread(
@@ -55,60 +62,52 @@ async def run_site_check(bot, user_id: int, index: int):
     await bot.send_message(
         user_id, f"📥 Найдено {total} новых медиа на {site['url']}. Отправляю…")
 
-    sent_urls = []
+    sent_count = 0
     for i, (url, path) in enumerate(new_media, start=1):
         ok = await _send_one(bot, user_id, path)
         if ok:
-            sent_urls.append(url)
+            sent_count += 1
             # отмечаем сразу, чтобы при сбое не качать заново
-            storage.mark_seen(user_id, index, [url])
+            storage.mark_seen(user_id, site_id, [url])
 
         if os.path.exists(path):
             os.remove(path)
 
-        # прогресс
         if i % PROGRESS_EVERY == 0 and i < total:
             await bot.send_message(user_id, f"… {i} из {total}")
 
-        # пауза между отправками — защита от flood limit
         await asyncio.sleep(SEND_DELAY)
 
     await bot.send_message(
         user_id,
-        f"✅ Готово! Отправлено {len(sent_urls)} из {total} с {site['url']}")
+        f"✅ Готово! Отправлено {sent_count} из {total} с {site['url']}")
 
 
-def schedule_site(bot: Bot, user_id: int, index: int, hours: int):
-    job_id = f"{user_id}_{index}"
+def schedule_site(bot: Bot, user_id: int, site_id: str, hours: int):
+    job_id = f"{user_id}_{site_id}"
     scheduler.add_job(
         run_site_check,
         "interval",
         hours=hours,
-        args=[bot, user_id, index],
+        args=[bot, user_id, site_id],
         id=job_id,
         replace_existing=True,
     )
 
-def unschedule_all_for_user(bot, user_id: int):
-    """Снимает все задачи пользователя (перед пересозданием после сдвига индексов)."""
-    for job in scheduler.get_jobs():
-        if job.id.startswith(f"{user_id}_"):
-            scheduler.remove_job(job.id)
 
+def unschedule_site(user_id: int, site_id: str):
+    """Снимает задачу одного сайта."""
+    job_id = f"{user_id}_{site_id}"
+    if scheduler.get_job(job_id):
+        scheduler.remove_job(job_id)
 
-def reschedule_user(bot, user_id: int):
-    """Пересоздаёт задачи пользователя с актуальными индексами."""
-    unschedule_all_for_user(bot, user_id)
-    sites = storage.list_sites(user_id)
-    for i, site in enumerate(sites):
-        schedule_site(bot, user_id, i, site["hours"])
 
 def reschedule_all(bot: Bot):
     """При старте бота восстанавливаем задачи из хранилища."""
     users = storage.all_users()
     for uid, info in users.items():
-        for i, site in enumerate(info.get("sites", [])):
-            schedule_site(bot, int(uid), i, site["hours"])
+        for site in info.get("sites", []):
+            schedule_site(bot, int(uid), site["id"], site["hours"])
 
 
 def start():

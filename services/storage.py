@@ -1,7 +1,9 @@
 import json
 import os
 import threading
-from config import STORAGE_PATH
+import uuid
+
+from config import STORAGE_PATH, SEEN_LIMIT
 
 _lock = threading.Lock()
 
@@ -13,10 +15,27 @@ def _ensure_file():
             json.dump({"users": {}}, f)
 
 
+def _migrate(data: dict) -> bool:
+    """
+    Добавляет поле id сайтам, у которых его ещё нет (старый формат).
+    Возвращает True, если что-то изменилось и данные надо сохранить.
+    """
+    changed = False
+    for user in data.get("users", {}).values():
+        for site in user.get("sites", []):
+            if "id" not in site:
+                site["id"] = uuid.uuid4().hex
+                changed = True
+    return changed
+
+
 def _load():
     _ensure_file()
     with open(STORAGE_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if _migrate(data):
+        _save(data)
+    return data
 
 
 def _save(data):
@@ -30,35 +49,38 @@ def get_user(user_id: int) -> dict:
     with _lock:
         data = _load()
         if user_id not in data["users"]:
-            data["users"][user_id] = {
-                "sites": [],          # список {"url":..., "hours": int, "seen": [...]}
-            }
+            data["users"][user_id] = {"sites": []}
             _save(data)
         return data["users"][user_id]
 
 
-def add_site(user_id: int, url: str, hours: int):
+def add_site(user_id: int, url: str, hours: int) -> str:
+    """Добавляет сайт и возвращает его id."""
     user_id = str(user_id)
+    site_id = uuid.uuid4().hex
     with _lock:
         data = _load()
         data["users"].setdefault(user_id, {"sites": []})
         data["users"][user_id]["sites"].append({
+            "id": site_id,
             "url": url,
             "hours": hours,
             "seen": [],
         })
         _save(data)
+    return site_id
 
 
-def remove_site(user_id: int, index: int) -> bool:
+def remove_site(user_id: int, site_id: str) -> bool:
     user_id = str(user_id)
     with _lock:
         data = _load()
         sites = data["users"].get(user_id, {}).get("sites", [])
-        if 0 <= index < len(sites):
-            sites.pop(index)
-            _save(data)
-            return True
+        for i, site in enumerate(sites):
+            if site["id"] == site_id:
+                sites.pop(i)
+                _save(data)
+                return True
         return False
 
 
@@ -66,21 +88,31 @@ def list_sites(user_id: int) -> list:
     return get_user(user_id).get("sites", [])
 
 
-def mark_seen(user_id: int, index: int, urls: list):
+def get_site(user_id: int, site_id: str) -> dict | None:
+    for site in list_sites(user_id):
+        if site["id"] == site_id:
+            return site
+    return None
+
+
+def mark_seen(user_id: int, site_id: str, urls: list):
     user_id = str(user_id)
     with _lock:
         data = _load()
         sites = data["users"].get(user_id, {}).get("sites", [])
-        if 0 <= index < len(sites):
-            existing = sites[index]["seen"]
+        for site in sites:
+            if site["id"] != site_id:
+                continue
+            existing = site["seen"]
             existing_set = set(existing)
             for u in urls:
                 if u not in existing_set:
                     existing.append(u)
                     existing_set.add(u)
-            # не даём списку расти бесконечно — оставляем последние 1000 по порядку
-            sites[index]["seen"] = existing[-1000:]
+            # не даём списку расти бесконечно
+            site["seen"] = existing[-SEEN_LIMIT:]
             _save(data)
+            return
 
 
 def all_users() -> dict:

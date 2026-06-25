@@ -1,5 +1,6 @@
 import os
 import time
+import logging
 import tempfile
 import urllib.robotparser as robotparser
 from urllib.parse import urljoin, urlparse
@@ -9,6 +10,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import MAX_FILES_PER_RUN, DOWNLOAD_DELAY, MAX_FILE_SIZE
+
+logger = logging.getLogger(__name__)
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MediaBot/1.0)"}
 
@@ -68,6 +71,15 @@ def _render_page_html(page_url: str) -> str:
         return html
 
 
+# Слова, по которым обычно видно, что это миниатюра/иконка, а не оригинал
+_THUMB_HINTS = ("thumb", "icon", "logo", "avatar", "sprite", "/small", "_small")
+
+
+def _looks_like_thumb(url: str) -> bool:
+    low = url.lower()
+    return any(hint in low for hint in _THUMB_HINTS)
+
+
 def _extract_full_image(page_url: str) -> str | None:
     """Заходит на страницу картинки и возвращает ссылку на полноразмерное изображение."""
     try:
@@ -75,17 +87,15 @@ def _extract_full_image(page_url: str) -> str | None:
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Берём самое большое изображение на странице:
-        # сначала пробуем типичные места, где лежит оригинал.
         candidates = []
 
-        # 1) ссылка <a> на сам файл изображения
+        # 1) прямые ссылки <a> на файл изображения — обычно это и есть оригинал
         for a in soup.find_all("a"):
             href = a.get("href", "")
             if href.lower().split("?")[0].endswith(IMAGE_EXT):
                 candidates.append(urljoin(page_url, href))
 
-        # 2) все <img> на странице
+        # 2) <img> с типичными атрибутами
         for img in soup.find_all("img"):
             for attr in ("src", "data-src", "data-original", "data-lazy-src"):
                 src = img.get(attr)
@@ -94,10 +104,15 @@ def _extract_full_image(page_url: str) -> str | None:
 
         if not candidates:
             return None
-        # эвристика: самый длинный URL часто = оригинал, а не миниатюра.
-        # но обычно первый <a> на файл — это и есть оригинал.
-        return candidates[0]
+
+        # Сначала отсеиваем явные миниатюры; если после фильтра пусто — берём как есть
+        full = [c for c in candidates if not _looks_like_thumb(c)]
+        pool = full or candidates
+
+        # Эвристика: оригинал обычно имеет самый длинный путь/имя файла.
+        return max(pool, key=len)
     except Exception:
+        logger.exception("Ошибка при извлечении полноразмерного изображения: %s", page_url)
         return None
 
 
@@ -171,6 +186,7 @@ def download_file(url: str) -> str | None:
                 f.write(chunk)
         return path
     except Exception:
+        logger.exception("Ошибка при скачивании файла: %s", url)
         return None
 
 

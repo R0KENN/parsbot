@@ -54,7 +54,7 @@ async def list_sites_cb(call: CallbackQuery):
         await call.message.edit_text("📭 Список пуст.", reply_markup=main_menu())
     else:
         await call.message.edit_text(
-            "📋 Твои сайты (нажми, чтобы удалить):",
+            "📋 Твои сайты (нажми для настроек):",
             reply_markup=sites_list(sites))
     await call.answer()
 

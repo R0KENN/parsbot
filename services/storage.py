@@ -72,14 +72,18 @@ def mark_seen(user_id: int, index: int, urls: list):
         data = _load()
         sites = data["users"].get(user_id, {}).get("sites", [])
         if 0 <= index < len(sites):
-            seen = set(sites[index]["seen"])
-            seen.update(urls)
-            # не даём списку расти бесконечно
-            sites[index]["seen"] = list(seen)[-1000:]
+            existing = sites[index]["seen"]
+            existing_set = set(existing)
+            for u in urls:
+                if u not in existing_set:
+                    existing.append(u)
+                    existing_set.add(u)
+            # не даём списку расти бесконечно — оставляем последние 1000 по порядку
+            sites[index]["seen"] = existing[-1000:]
             _save(data)
 
 
-def all_users(self=None) -> dict:
+def all_users() -> dict:
     """Все пользователи и их сайты — нужно планировщику при старте."""
     with _lock:
         return _load()["users"]

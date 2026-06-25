@@ -76,7 +76,13 @@ def find_media_urls(page_url: str) -> list:
     html = _render_page_html(page_url)
     soup = BeautifulSoup(html, "html.parser")
 
-    urls = set()
+    urls = []
+    seen = set()  # только для отсева дублей, порядок храним в списке
+
+    def add(u):
+        if u not in seen:
+            seen.add(u)
+            urls.append(u)
 
     for img in soup.find_all("img"):
         for attr in ("src", "data-src", "data-original", "data-lazy-src"):
@@ -84,14 +90,14 @@ def find_media_urls(page_url: str) -> list:
             if src:
                 full = urljoin(page_url, src)
                 if full.lower().split("?")[0].endswith(IMAGE_EXT):
-                    urls.add(full)
+                    add(full)
 
     for tag in soup.find_all(["video", "source"]):
         src = tag.get("src")
         if src:
             full = urljoin(page_url, src)
             if full.lower().split("?")[0].endswith(VIDEO_EXT):
-                urls.add(full)
+                add(full)
 
     for a in soup.find_all("a"):
         href = a.get("href")
@@ -99,10 +105,9 @@ def find_media_urls(page_url: str) -> list:
             full = urljoin(page_url, href)
             clean = full.lower().split("?")[0]
             if clean.endswith(IMAGE_EXT + VIDEO_EXT):
-                urls.add(full)
+                add(full)
 
-    return list(urls)
-
+    return urls
 
 def download_file(url: str) -> str | None:
     """Скачивает файл во временную папку. Возвращает путь или None."""

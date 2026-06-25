@@ -39,7 +39,7 @@ async def run_site_check(bot, user_id: int, index: int):
 
     try:
         new_media = await asyncio.to_thread(
-        scraper.fetch_new_media, site["url"], site["seen"])
+            scraper.fetch_new_media, site["url"], site["seen"])
     except PermissionError:
         await bot.send_message(
             user_id, f"⚠️ robots.txt запрещает доступ к {site['url']}")

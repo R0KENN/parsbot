@@ -17,7 +17,7 @@ from services import storage, scraper, reddit
 
 # Задачи держим в памяти. При перезапуске они заново создаются из
 # storage.json через reschedule_all() — это и есть наша персистентность.
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone="UTC")
 
 VIDEO_EXT = (".mp4", ".webm", ".mov")
 

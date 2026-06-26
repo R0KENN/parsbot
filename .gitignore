@@ -8,3 +8,6 @@ reddit_state.json
 reddit_cookies.txt
 cookies.txt
 data/
+site_cookies.txt
+logs/
+*.log

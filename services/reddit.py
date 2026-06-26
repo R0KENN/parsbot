@@ -235,6 +235,9 @@ def _download_video(post_url: str) -> str | None:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(post_url, download=True)
+            if not info:
+                logger.warning("yt-dlp не вернул инфо по видео: %s", post_url)
+                return None
             path = ydl.prepare_filename(info)
             if not os.path.exists(path):
                 base, _ = os.path.splitext(path)

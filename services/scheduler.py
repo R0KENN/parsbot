@@ -45,6 +45,19 @@ def _safe_remove(path: str, attempts: int = 5, delay: float = 0.5) -> None:
 async def _send_one(bot, user_id, path):
     """Отправляет один файл с обработкой flood limit и сетевых сбоев."""
     is_video = path.lower().endswith(VIDEO_EXT)
+    # показываем в чате плашку «отправляет видео / фото / документ…»
+    too_big_for_photo_pre = (
+        os.path.exists(path) and os.path.getsize(path) > MAX_PHOTO_SIZE
+    )
+    try:
+        if is_video:
+            await bot.send_chat_action(user_id, "upload_video")
+        elif too_big_for_photo_pre:
+            await bot.send_chat_action(user_id, "upload_document")
+        else:
+            await bot.send_chat_action(user_id, "upload_photo")
+    except Exception:
+        pass
     # Фото крупнее лимита Telegram отверг бы — шлём документом.
     too_big_for_photo = (
         os.path.exists(path) and os.path.getsize(path) > MAX_PHOTO_SIZE
@@ -96,42 +109,87 @@ async def _safe_edit(status, text: str, cache: dict):
         pass
 
 
-async def _send_album(bot, user_id, batch):
+async def _send_album(bot, user_id, batch, on_sent=None):
     """
     Шлёт пачку медиа одним альбомом (до ALBUM_SIZE штук).
     batch — список путей к файлам.
     Возвращает список путей, которые реально были отправлены.
+    Крупные фото (> MAX_PHOTO_SIZE) в альбом не кладём — Telegram их отвергнет,
+    их шлём отдельно документом через _send_one.
     """
     media = []
+    big_photos = []
     for path in batch:
+        is_video = path.lower().endswith(VIDEO_EXT)
+        too_big_photo = (
+            not is_video
+            and os.path.exists(path)
+            and os.path.getsize(path) > MAX_PHOTO_SIZE
+        )
+        if too_big_photo:
+            big_photos.append(path)
+            continue
         file = FSInputFile(path)
-        if path.lower().endswith(VIDEO_EXT):
+        if is_video:
             media.append(InputMediaVideo(media=file))
         else:
             media.append(InputMediaPhoto(media=file))
+
+    sent = []
+
+    # крупные фото — по одному документом
+    for path in big_photos:
+        if await _send_one(bot, user_id, path):
+            sent.append(path)
+        await asyncio.sleep(SEND_DELAY)
+
+    if not media:
+        return sent
+
+    # альбом из одного элемента Telegram не принимает — шлём как одиночный
+    if len(media) == 1:
+        path = next(p for p in batch if p not in big_photos)
+        if await _send_one(bot, user_id, path):
+            sent.append(path)
+        return sent
+
+
+    # плашка «отправляет видео…» для альбома
+    has_video = any(isinstance(m, InputMediaVideo) for m in media)
+    try:
+        await bot.send_chat_action(
+            user_id, "upload_video" if has_video else "upload_photo")
+    except Exception:
+        pass
 
     net_retries = 0
     while True:
         try:
             await bot.send_media_group(user_id, media)
-            return list(batch)
+            album_paths = [p for p in batch if p not in big_photos]
+            if on_sent:
+                for i in range(1, len(album_paths) + 1):
+                    on_sent(len(sent) + i)
+            return sent + album_paths
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except TelegramNetworkError:
             net_retries += 1
             if net_retries > 3:
-                # сеть не восстановилась — пробуем по одному
-                sent = []
                 for path in batch:
+                    if path in big_photos:
+                        continue
                     if await _send_one(bot, user_id, path):
                         sent.append(path)
+                        if on_sent:
+                            on_sent(len(sent))
                     await asyncio.sleep(SEND_DELAY)
                 return sent
             await asyncio.sleep(2 * net_retries)
         except Exception:
-            # альбом не ушёл целиком — пробуем по одному, чтобы не терять всё
-            sent = []
             for path in batch:
+                if path in big_photos:
+                    continue
                 if await _send_one(bot, user_id, path):
                     sent.append(path)
                 await asyncio.sleep(SEND_DELAY)
@@ -181,19 +239,24 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
     except Exception:
         pinned = False
 
+    _spin = {"i": 0}
+    _frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
     def render() -> str:
         stage = state["stage"]
         done, total = state["done"], state["total"]
+        sp = _frames[_spin["i"] % len(_frames)]
+        _spin["i"] += 1
         foot = f"\n\n📡 {url}"
         if stage == "search":
-            return "🔍 Ищу новые медиа…" + foot
+            return f"{sp} 🔍 Ищу новые медиа…" + foot
         if stage in ("search_done", "download"):
             if total == 0:
                 return "🔍 Поиск завершён.\nНовых медиа нет." + foot
-            return (f"⬇️ Скачивание\n{_progress_bar(done, total)}" + foot)
+            return (f"{sp} ⬇️ Скачиваю\n{_progress_bar(done, total)}" + foot)
         if stage == "upload":
-            return (f"⬆️ Выгрузка в Telegram\n{_progress_bar(done, total)}"
-                    + foot)
+            return (f"{sp} ⬆️ Отправляю в Telegram\n"
+                    f"{_progress_bar(done, total)}" + foot)
         return "✅ Готово!" + foot
 
     # фоновая задача-художник: раз в секунду перерисовывает сообщение
@@ -258,14 +321,21 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
     state["done"] = 0
 
     sent_count = 0
+    base_done = 0  # сколько уже отправлено в предыдущих пачках
+
+    def on_sent(_n=1):
+        # дёргается после каждого отправленного файла — двигает прогресс-бар
+        state["done"] = min(base_done + _n, total)
+
     for start in range(0, total, ALBUM_SIZE):
         chunk = new_media[start:start + ALBUM_SIZE]
         paths = [p for (_u, p) in chunk]
 
-        sent_paths = await _send_album(bot, user_id, paths)
+        sent_paths = await _send_album(bot, user_id, paths, on_sent=on_sent)
         sent_set = set(sent_paths)
         sent_count += len(sent_paths)
-        state["done"] = min(start + len(chunk), total)
+        base_done += len(chunk)
+        state["done"] = min(base_done, total)
 
         await asyncio.sleep(0.3)  # дать Telegram отпустить файлы перед удалением
 

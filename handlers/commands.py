@@ -42,6 +42,9 @@ async def cmd_cancel(message: Message, state: FSMContext):
 # Шаг 1: пользователь прислал ссылку
 @router.message(StateFilter(AddSite.waiting_url))
 async def receive_url(message: Message, state: FSMContext):
+    if not message.text:
+        await message.answer("❌ Пришли ссылку текстом (URL целиком).")
+        return
     url = message.text.strip()
     if not url.startswith(("http://", "https://")):
         await message.answer("❌ Это не похоже на ссылку. Пришли URL целиком.")

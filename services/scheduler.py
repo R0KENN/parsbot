@@ -1,9 +1,13 @@
 import asyncio
 import os
 
+# Замки на каждый (user_id, site_id), чтобы один сайт не проверялся
+# одновременно планировщиком и кнопкой «Проверить сейчас».
+_site_locks: dict = {}
+
 from aiogram import Bot
 from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import (
@@ -39,12 +43,13 @@ def _safe_remove(path: str, attempts: int = 5, delay: float = 0.5) -> None:
             return
 
 async def _send_one(bot, user_id, path):
-    """Отправляет один файл с обработкой flood limit."""
+    """Отправляет один файл с обработкой flood limit и сетевых сбоев."""
     is_video = path.lower().endswith(VIDEO_EXT)
     # Фото крупнее лимита Telegram отверг бы — шлём документом.
     too_big_for_photo = (
         os.path.exists(path) and os.path.getsize(path) > MAX_PHOTO_SIZE
     )
+    net_retries = 0
     while True:
         try:
             file = FSInputFile(path)
@@ -58,6 +63,12 @@ async def _send_one(bot, user_id, path):
         except TelegramRetryAfter as e:
             # Telegram просит подождать N секунд — ждём и пробуем снова
             await asyncio.sleep(e.retry_after + 1)
+        except TelegramNetworkError:
+            # временный сетевой сбой — пара повторов с нарастающей паузой
+            net_retries += 1
+            if net_retries > 3:
+                return False
+            await asyncio.sleep(2 * net_retries)
         except Exception:
             return False
 
@@ -99,12 +110,24 @@ async def _send_album(bot, user_id, batch):
         else:
             media.append(InputMediaPhoto(media=file))
 
+    net_retries = 0
     while True:
         try:
             await bot.send_media_group(user_id, media)
             return list(batch)
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
+        except TelegramNetworkError:
+            net_retries += 1
+            if net_retries > 3:
+                # сеть не восстановилась — пробуем по одному
+                sent = []
+                for path in batch:
+                    if await _send_one(bot, user_id, path):
+                        sent.append(path)
+                    await asyncio.sleep(SEND_DELAY)
+                return sent
+            await asyncio.sleep(2 * net_retries)
         except Exception:
             # альбом не ушёл целиком — пробуем по одному, чтобы не терять всё
             sent = []
@@ -120,6 +143,23 @@ async def run_site_check(bot, user_id: int, site_id: str):
     site = storage.get_site(user_id, site_id)
     if site is None:
         return
+
+    # не даём двум проверкам одного сайта идти одновременно
+    lock_key = f"{user_id}_{site_id}"
+    lock = _site_locks.setdefault(lock_key, asyncio.Lock())
+    if lock.locked():
+        try:
+            await bot.send_message(
+                user_id, "⏳ Этот сайт уже проверяется, дождись окончания.")
+        except Exception:
+            pass
+        return
+
+    async with lock:
+        await _run_site_check_inner(bot, user_id, site_id, site)
+
+
+async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
 
     url = site["url"]
     cache = {"last": None}
@@ -166,14 +206,15 @@ async def run_site_check(bot, user_id: int, site_id: str):
 
     # --- поиск + скачивание (в потоке, с прогрессом) ---
     try:
+        limit = site.get("limit", 200)
         if reddit.is_reddit_url(url):
             new_media = await asyncio.to_thread(
                 reddit.fetch_new_media, url, site["seen"],
                 site.get("sort", "new"), site.get("period", "day"),
-                on_progress)
+                on_progress, limit)
         else:
             new_media = await asyncio.to_thread(
-                scraper.fetch_new_media, url, site["seen"], on_progress)
+                scraper.fetch_new_media, url, site["seen"], on_progress, limit)
     except PermissionError:
         state["active"] = False
         paint_task.cancel()
@@ -249,7 +290,10 @@ async def run_site_check(bot, user_id: int, site_id: str):
         f"Отправлено {sent_count} из {total}"
     )
     if skipped > 0:
-        final += f"\n⚠️ Пропущено {skipped} (слишком большие или ошибка)"
+        final += (
+            f"\n⚠️ Не отправлено {skipped} "
+            f"(превышен лимит Telegram 50 МБ или ошибка отправки)"
+        )
     final += f"\n\n📡 {url}"
     await _safe_edit(status, final, cache)
 

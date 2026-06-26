@@ -72,13 +72,31 @@ def cleanup_temp(max_age_hours: float = 6.0):
     else:
         logging.info("Очистка Temp: старых файлов не найдено")
 
-logging.basicConfig(level=logging.INFO)
+from logging.handlers import RotatingFileHandler
+
+_log_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_file_handler = RotatingFileHandler(
+    os.path.join(_log_dir, "bot.log"),
+    maxBytes=5 * 1024 * 1024,   # 5 МБ на файл
+    backupCount=5,              # хранить 5 старых файлов
+    encoding="utf-8",
+)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),   # консоль
+        _file_handler,             # файл logs/bot.log
+    ],
+)
 
 
 async def set_commands(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="start", description="Запустить бота / меню"),
         BotCommand(command="menu", description="Главное меню"),
+        BotCommand(command="cancel", description="Отменить текущее действие"),
     ])
 
 

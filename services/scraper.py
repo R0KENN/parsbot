@@ -261,7 +261,8 @@ def download_file(url: str) -> str | None:
         return None
 
 
-def fetch_new_media(page_url: str, seen: list, on_progress=None) -> list:
+def fetch_new_media(page_url: str, seen: list, on_progress=None,
+                    limit: int = None) -> list:
     """
     Возвращает список (url, путь_к_файлу) для новых медиа.
     on_progress(stage, done, total) — необязательный callback прогресса.
@@ -269,6 +270,11 @@ def fetch_new_media(page_url: str, seen: list, on_progress=None) -> list:
     def report(stage, done, total):
         if on_progress:
             on_progress(stage, done, total)
+
+    # limit: None -> берём из конфига; 0 -> без ограничения (все); N -> N
+    if limit is None:
+        limit = MAX_FILES_PER_RUN
+    eff_limit = None if limit == 0 else limit
 
     report("search", 0, 0)
     seen_set = set(seen)
@@ -295,12 +301,12 @@ def fetch_new_media(page_url: str, seen: list, on_progress=None) -> list:
     # 3) Ссылки на отдельные посты — каждую пробуем через yt-dlp
     post_links = find_post_links(page_url, html)
     new_posts = [u for u in post_links if u not in seen_set]
-    if MAX_FILES_PER_RUN:
-        new_posts = new_posts[:MAX_FILES_PER_RUN]
+    if eff_limit:
+        new_posts = new_posts[:eff_limit]
 
     new_urls = [u for u in all_urls if u not in seen_set]
-    if MAX_FILES_PER_RUN:
-        new_urls = new_urls[:MAX_FILES_PER_RUN]
+    if eff_limit:
+        new_urls = new_urls[:eff_limit]
 
     total = len(new_urls) + len(new_posts)
     report("search_done", total, total)

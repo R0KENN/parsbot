@@ -253,7 +253,7 @@ def _download_video(post_url: str) -> str | None:
 
 def fetch_new_media(subreddit_url: str, seen: list,
                     sort: str = None, period: str = None,
-                    on_progress=None) -> list:
+                    on_progress=None, limit: int = None) -> list:
     def report(stage, done, total):
         if on_progress:
             on_progress(stage, done, total)
@@ -274,6 +274,9 @@ def fetch_new_media(subreddit_url: str, seen: list,
         all_items.extend(_extract_media_from_post(post))
 
     new_items = [it for it in all_items if it["id"] not in seen_set]
+    # limit: None/<=0 -> все; N -> первые N
+    if limit and limit > 0:
+        new_items = new_items[:limit]
     total = len(new_items)
     report("search_done", total, total)
 

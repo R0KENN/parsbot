@@ -12,6 +12,7 @@ router = Router()
 class AddSite(StatesGroup):
     waiting_url = State()
     waiting_hours = State()
+    waiting_limit = State()
     waiting_sort = State()
     waiting_period = State()
 
@@ -29,6 +30,14 @@ async def cmd_start(message: Message):
 async def cmd_menu(message: Message):
     await message.answer("Главное меню:", reply_markup=main_menu())
 
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current is None:
+        await message.answer("Нечего отменять.", reply_markup=main_menu())
+        return
+    await state.clear()
+    await message.answer("❌ Отменено.", reply_markup=main_menu())
 
 # Шаг 1: пользователь прислал ссылку
 @router.message(StateFilter(AddSite.waiting_url))

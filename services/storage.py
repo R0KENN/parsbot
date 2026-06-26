@@ -35,6 +35,9 @@ def _migrate(data: dict) -> bool:
             if "seen" not in site:
                 site["seen"] = []
                 changed = True
+            if "limit" not in site:
+                site["limit"] = 200   # дефолт для старых записей
+                changed = True
     return changed
 
 
@@ -64,7 +67,8 @@ def get_user(user_id: int) -> dict:
 
 
 def add_site(user_id: int, url: str, hours: int,
-             sort: str = "new", period: str = "day") -> str:
+             sort: str = "new", period: str = "day",
+             limit: int = 200) -> str:
     """Добавляет сайт/сабреддит и возвращает его id."""
     user_id = str(user_id)
     site_id = uuid.uuid4().hex
@@ -77,6 +81,7 @@ def add_site(user_id: int, url: str, hours: int,
             "hours": hours,
             "sort": sort,        # new / hot / top — для reddit
             "period": period,    # hour/day/week/month/year/all — для top
+            "limit": limit,      # 0 = без ограничения (все по очереди)
             "seen": [],
         })
         _save(data)
@@ -106,6 +111,31 @@ def get_site(user_id: int, site_id: str) -> dict | None:
             return site
     return None
 
+def update_limit(user_id: int, site_id: str, limit: int) -> bool:
+    """Меняет лимит медиа за раз у конкретного сайта. 0 = все."""
+    user_id = str(user_id)
+    with _lock:
+        data = _load()
+        sites = data["users"].get(user_id, {}).get("sites", [])
+        for site in sites:
+            if site["id"] == site_id:
+                site["limit"] = limit
+                _save(data)
+                return True
+        return False
+
+def update_hours(user_id: int, site_id: str, hours: int) -> bool:
+    """Меняет интервал проверки (в часах) у конкретного сайта."""
+    user_id = str(user_id)
+    with _lock:
+        data = _load()
+        sites = data["users"].get(user_id, {}).get("sites", [])
+        for site in sites:
+            if site["id"] == site_id:
+                site["hours"] = hours
+                _save(data)
+                return True
+        return False
 
 def mark_seen(user_id: int, site_id: str, urls: list):
     user_id = str(user_id)

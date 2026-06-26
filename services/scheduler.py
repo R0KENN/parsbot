@@ -18,6 +18,26 @@ scheduler = AsyncIOScheduler()
 VIDEO_EXT = (".mp4", ".webm", ".mov")
 
 
+
+def _safe_remove(path: str, attempts: int = 5, delay: float = 0.5) -> None:
+    """
+    Безопасно удаляет файл. На Windows файл может быть ещё занят
+    (WinError 32) — повторяем несколько раз, потом просто пропускаем.
+    """
+    import time
+    for _ in range(attempts):
+        if not os.path.exists(path):
+            return
+        try:
+            os.remove(path)
+            return
+        except PermissionError:
+            time.sleep(delay)
+        except FileNotFoundError:
+            return
+        except Exception:
+            return
+
 async def _send_one(bot, user_id, path):
     """Отправляет один файл с обработкой flood limit."""
     is_video = path.lower().endswith(VIDEO_EXT)
@@ -206,13 +226,14 @@ async def run_site_check(bot, user_id: int, site_id: str):
         sent_count += len(sent_paths)
         state["done"] = min(start + len(chunk), total)
 
+        await asyncio.sleep(0.3)  # дать Telegram отпустить файлы перед удалением
+
         for (u, p) in chunk:
             if p in sent_set:
                 storage.mark_seen(user_id, site_id, [u])
 
         for (_u, p) in chunk:
-            if os.path.exists(p):
-                os.remove(p)
+            _safe_remove(p)
 
         await asyncio.sleep(SEND_DELAY)
 

@@ -29,6 +29,49 @@ def health_check():
             "авторизации. См. инструкцию по reddit_cookies.txt",
             REDDIT_COOKIES_PATH)
 
+
+
+def cleanup_temp(max_age_hours: float = 6.0):
+    """
+    Удаляет старые временные медиафайлы бота из системного Temp.
+    Чистит файлы с префиксами sc_ / rd_ / mb_, которые старше max_age_hours.
+    Свежие (возможно, ещё качаются/отправляются) — не трогаем.
+    """
+    import tempfile
+    import time
+
+    tmp = tempfile.gettempdir()
+    prefixes = ("sc_", "rd_", "mb_")
+    now = time.time()
+    max_age = max_age_hours * 3600
+
+    removed = 0
+    try:
+        for name in os.listdir(tmp):
+            if not name.startswith(prefixes):
+                continue
+            path = os.path.join(tmp, name)
+            try:
+                if not os.path.isfile(path):
+                    continue
+                if now - os.path.getmtime(path) < max_age:
+                    continue  # слишком свежий — мог ещё использоваться
+                os.remove(path)
+                removed += 1
+            except (PermissionError, FileNotFoundError):
+                # файл занят или уже удалён — пропускаем
+                pass
+            except Exception:
+                pass
+    except Exception:
+        logging.warning("Не удалось почистить временную папку %s", tmp)
+        return
+
+    if removed:
+        logging.info("Очистка Temp: удалено старых файлов — %s", removed)
+    else:
+        logging.info("Очистка Temp: старых файлов не найдено")
+
 logging.basicConfig(level=logging.INFO)
 
 
@@ -41,6 +84,7 @@ async def set_commands(bot: Bot):
 
 async def main():
     health_check()
+    cleanup_temp()
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())

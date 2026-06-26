@@ -157,7 +157,6 @@ def find_post_links(page_url: str, html: str = None) -> list:
 
     return links
 
-def download_video_with_ytdlp(page_url: str) -> str | None:
 def _resolve_ytdlp_path(ydl, entry) -> str | None:
     """По info-словарю одного видео возвращает реальный путь к файлу."""
     path = ydl.prepare_filename(entry)

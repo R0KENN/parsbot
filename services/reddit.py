@@ -6,7 +6,12 @@ import time
 
 import requests
 import yt_dlp
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+    _HAS_PLAYWRIGHT = True
+except ImportError:
+    sync_playwright = None
+    _HAS_PLAYWRIGHT = False
 
 from services.http import make_session, DEFAULT_TIMEOUT
 
@@ -60,6 +65,12 @@ _REDDIT_HOSTS = (
 
 def _fetch_via_browser(subreddit: str, sort: str, period: str) -> list:
     import json
+
+    if not _HAS_PLAYWRIGHT:
+        raise RuntimeError(
+            "Playwright не установлен — резервный способ через браузер "
+            "недоступен (нормально для Termux/Android)."
+        )
 
     url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={REDDIT_LIMIT}&raw_json=1"
     if sort == "top":

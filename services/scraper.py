@@ -4,7 +4,12 @@ import time
 import logging
 import tempfile
 from urllib.parse import urljoin, urlparse
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+    _HAS_PLAYWRIGHT = True
+except ImportError:
+    sync_playwright = None
+    _HAS_PLAYWRIGHT = False
 
 import requests
 import yt_dlp
@@ -56,6 +61,18 @@ def _render_page_html(page_url: str):
     Возвращает (html, sniffed_video_urls) — sniffed_video_urls это
     ссылки на видео, пойманные в сетевых запросах самой страницы.
     """
+    if not _HAS_PLAYWRIGHT:
+        # Без браузера качаем обычным запросом, без JS-рендера и без снифа видео
+        try:
+            resp = _session().get(page_url, headers=HEADERS,
+                                  timeout=DEFAULT_TIMEOUT)
+            resp.raise_for_status()
+            return resp.text, []
+        except Exception:
+            logger.warning("Не удалось получить страницу без браузера: %s",
+                           page_url)
+            return "", []
+
     sniffed = []
     sniffed_set = set()
 

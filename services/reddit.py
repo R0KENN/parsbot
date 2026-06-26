@@ -1,11 +1,11 @@
 import os
 import re
 import logging
-import subprocess
 import tempfile
 import time
 
 import requests
+import yt_dlp
 from playwright.sync_api import sync_playwright
 
 from config import (
@@ -16,8 +16,6 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# Reddit режет запросы с "питоновским" User-Agent и без браузерных заголовков.
-# Поэтому притворяемся обычным браузером — это главное лекарство от 403 Blocked.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -26,7 +24,7 @@ HEADERS = {
     ),
     "Accept": "application/json, text/html;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate",
     "Referer": "https://www.reddit.com/",
     "Connection": "keep-alive",
 }
@@ -35,37 +33,22 @@ IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
 
 def is_reddit_url(url: str) -> bool:
-    """Определяет, что ссылка ведёт на сабреддит."""
     return "reddit.com/r/" in url.lower()
 
 
 def _subreddit_name(url: str) -> str | None:
-    """Достаёт имя сабреддита из ссылки вида https://reddit.com/r/pics."""
     m = re.search(r"reddit\.com/r/([A-Za-z0-9_]+)", url)
     return m.group(1) if m else None
 
 
-def _has_ffmpeg() -> bool:
-    try:
-        subprocess.run(["ffmpeg", "-version"],
-                       capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
-
-# Несколько зеркал Reddit. Пробуем по очереди — если один домен блокирует,
-# другой часто отдаёт данные. old.reddit.com обычно самый "мягкий".
 _REDDIT_HOSTS = (
     "https://old.reddit.com",
     "https://www.reddit.com",
     "https://reddit.com",
 )
 
+
 def _fetch_via_browser(subreddit: str, sort: str, period: str) -> list:
-    """
-    Запасной способ: открываем JSON-страницу Reddit настоящим браузером
-    через Playwright. Reddit не считает его ботом, поэтому 403 обходится.
-    """
     import json
 
     url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={REDDIT_LIMIT}&raw_json=1"
@@ -95,7 +78,6 @@ def _fetch_via_browser(subreddit: str, sort: str, period: str) -> list:
         finally:
             browser.close()
 
-    # покажем первые символы ответа, чтобы понять, что прислал Reddit
     preview = body[:200].replace("\n", " ")
     logger.info("Playwright: начало ответа: %s", preview)
 
@@ -111,13 +93,9 @@ def _fetch_via_browser(subreddit: str, sort: str, period: str) -> list:
     logger.info("Playwright: получено постов = %s", len(posts))
     return posts
 
+
 def _fetch_listing(subreddit: str, sort: str, period: str) -> list:
-    """
-    Берёт ленту сабреддита через публичный JSON, без OAuth.
-    Перебирает зеркала и делает повтор при 429 (слишком много запросов).
-    """
     params = {"limit": REDDIT_LIMIT, "raw_json": 1}
-    # период t= нужен только для сортировки top
     if sort == "top":
         params["t"] = period
 
@@ -125,13 +103,11 @@ def _fetch_listing(subreddit: str, sort: str, period: str) -> list:
 
     for host in _REDDIT_HOSTS:
         url = f"{host}/r/{subreddit}/{sort}.json"
-        # до 3 попыток на каждый домен (на случай 429)
         for attempt in range(3):
             try:
                 resp = requests.get(url, headers=HEADERS,
                                     params=params, timeout=30)
                 if resp.status_code == 429:
-                    # Reddit просит подождать — ждём и пробуем снова
                     wait = int(resp.headers.get("Retry-After", 5))
                     logger.warning("429 от %s, ждём %s сек", host, wait)
                     time.sleep(wait + 1)
@@ -142,9 +118,8 @@ def _fetch_listing(subreddit: str, sort: str, period: str) -> list:
             except Exception as e:
                 last_error = e
                 logger.warning("Не вышло с %s: %s", host, e)
-                break  # этот домен не отвечает — пробуем следующий
+                break
 
-    # обычные запросы заблокированы — пробуем настоящий браузер
     logger.warning("Все зеркала вернули блок, пробуем через Playwright…")
     try:
         return _fetch_via_browser(subreddit, sort, period)
@@ -156,32 +131,24 @@ def _fetch_listing(subreddit: str, sort: str, period: str) -> list:
 
 
 def _extract_media_from_post(post: dict) -> list:
-    """
-    Возвращает список словарей: {"id":, "type": "photo"/"video", "url":, "permalink":}
-    Обрабатывает: прямые картинки, галереи, reddit-видео.
-    """
     items = []
     post_id = post.get("name") or post.get("id")
     permalink = "https://www.reddit.com" + post.get("permalink", "")
 
-    # 1) Reddit-видео (v.redd.it) — берём прямую ссылку на видеопоток
+    # 1) Reddit-видео — качаем через yt-dlp по permalink
     if post.get("is_video") and post.get("media", {}).get("reddit_video"):
-        rv = post["media"]["reddit_video"]
-        fallback = rv.get("fallback_url", "")
-        if fallback:
-            items.append({
-                "id": post_id,
-                "type": "video",
-                "url": fallback,  # полный URL с токеном — нужен для fallback-скачивания
-                "permalink": permalink,
-            })
+        items.append({
+            "id": post_id,
+            "type": "video",
+            "url": permalink,
+            "permalink": permalink,
+        })
         return items
 
-    # 2) Галерея (несколько фото в посте)
+    # 2) Галерея
     if post.get("is_gallery") and post.get("media_metadata"):
-        for i, (mid, meta) in enumerate(post["media_metadata"].items()):
+        for mid, meta in post["media_metadata"].items():
             try:
-                # s.u — ссылка на оригинал; иногда в meta["s"]["gif"]
                 src = meta.get("s", {})
                 link = src.get("u") or src.get("gif")
                 if not link:
@@ -197,7 +164,7 @@ def _extract_media_from_post(post: dict) -> list:
                 logger.exception("Ошибка разбора элемента галереи")
         return items
 
-    # 3) Прямая картинка (i.redd.it и т.п.)
+    # 3) Прямая картинка
     url = post.get("url_overridden_by_dest") or post.get("url", "")
     if url.split("?")[0].lower().endswith(IMAGE_EXT):
         items.append({
@@ -211,8 +178,6 @@ def _extract_media_from_post(post: dict) -> list:
 
 
 def _download_image(url: str) -> str | None:
-    # Для i.redd.it / preview.redd.it НЕ нужен Referer на reddit.com —
-    # иначе Reddit редиректит на www.reddit.com/media и отдаёт 403.
     img_headers = {
         "User-Agent": HEADERS["User-Agent"],
         "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
@@ -221,7 +186,6 @@ def _download_image(url: str) -> str | None:
     try:
         resp = requests.get(url, headers=img_headers, timeout=60,
                             stream=True, allow_redirects=True)
-        # если всё же редиректнуло на страницу-блокировку reddit.com — стоп
         if "reddit.com/media" in resp.url:
             logger.warning("Картинка ушла в редирект на media: %s", url)
             return None
@@ -245,180 +209,51 @@ def _download_image(url: str) -> str | None:
         return None
 
 
-import xml.etree.ElementTree as ET
+def _download_video(post_url: str) -> str | None:
+    """
+    Качает reddit-видео через yt-dlp по ссылке на пост.
+    yt-dlp сам находит видео+аудио и склеивает их (нужен ffmpeg).
+    """
+    tmp = tempfile.gettempdir()
+    out_tmpl = os.path.join(tmp, "rd_%(id)s.%(ext)s")
 
-
-def _download_to(url: str, path: str, referer: str = None) -> bool:
-    """Качает один файл по прямой ссылке. True — успех.
-    Для v.redd.it нужен корректный Referer и БЕЗ сжатия (br ломает mp4)."""
-    headers = {
-        "User-Agent": HEADERS["User-Agent"],
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        # НЕ просим br/gzip для бинарного файла — иначе поток может побиться
-        "Accept-Encoding": "identity",
-        "Referer": referer or "https://www.reddit.com/",
+    ydl_opts = {
+        "outtmpl": out_tmpl,
+        "format": "bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+        "retries": 3,
+        "http_headers": {"User-Agent": HEADERS["User-Agent"]},
     }
+
+    if os.path.exists(REDDIT_COOKIES_PATH):
+        ydl_opts["cookiefile"] = REDDIT_COOKIES_PATH
+
     try:
-        resp = requests.get(url, headers=headers, timeout=120, stream=True)
-        if resp.status_code != 200:
-            logger.warning("HTTP %s при скачивании %s", resp.status_code, url)
-            return False
-        downloaded = 0
-        with open(path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1 << 16):
-                if not chunk:
-                    continue
-                downloaded += len(chunk)
-                if downloaded > MAX_FILE_SIZE:
-                    f.close()
-                    os.remove(path)
-                    logger.warning("Файл превысил лимит размера: %s", url)
-                    return False
-                f.write(chunk)
-        return os.path.exists(path) and os.path.getsize(path) > 0
-    except Exception:
-        logger.exception("Ошибка скачивания файла: %s", url)
-        return False
-
-
-# Пространство имён в манифесте MPEG-DASH
-_MPD_NS = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
-
-
-def _parse_dash_playlist(base: str, permalink: str):
-    """
-    Скачивает и разбирает DASHPlaylist.mpd сабреддит-видео.
-    Возвращает (video_name, audio_name|None) — РЕАЛЬНЫЕ имена дорожек,
-    взятые из манифеста, а не угаданные.
-    base — https://v.redd.it/<id>
-    """
-    mpd_url = f"{base}/DASHPlaylist.mpd"
-    headers = {
-        "User-Agent": HEADERS["User-Agent"],
-        "Accept": "application/dash+xml,*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "identity",
-        "Referer": permalink or "https://www.reddit.com/",
-    }
-    try:
-        resp = requests.get(mpd_url, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            logger.warning("MPD недоступен (HTTP %s): %s",
-                           resp.status_code, mpd_url)
-            return None, None
-        root = ET.fromstring(resp.content)
-    except Exception:
-        logger.exception("Не удалось разобрать DASHPlaylist.mpd: %s", mpd_url)
-        return None, None
-
-    best_video = None
-    best_video_h = -1
-    best_audio = None
-    best_audio_br = -1
-
-    for adapt in root.iter("{urn:mpeg:dash:schema:mpd:2011}AdaptationSet"):
-        ctype = (adapt.get("contentType") or adapt.get("mimeType") or "").lower()
-        for rep in adapt.findall("mpd:Representation", _MPD_NS):
-            # имя файла дорожки лежит в BaseURL
-            base_url_el = rep.find("mpd:BaseURL", _MPD_NS)
-            if base_url_el is None or not base_url_el.text:
-                continue
-            name = base_url_el.text.strip()
-            mime = (rep.get("mimeType") or ctype).lower()
-
-            if "video" in mime or "video" in ctype:
-                h = int(rep.get("height") or 0)
-                if h > best_video_h:
-                    best_video_h = h
-                    best_video = name
-            elif "audio" in mime or "audio" in ctype:
-                br = int(rep.get("bandwidth") or 0)
-                if br > best_audio_br:
-                    best_audio_br = br
-                    best_audio = name
-
-    return best_video, best_audio
-
-
-def _download_video(video_url: str, permalink: str = None) -> str | None:
-    """
-    Качает reddit-видео самым надёжным способом: читает DASHPlaylist.mpd,
-    берёт оттуда реальные имена видео- и аудиодорожек, качает их и
-    склеивает через ffmpeg. Не зависит от угадывания имён и от cookies.
-    video_url — прямая ссылка вида https://v.redd.it/<id>/DASH_720.mp4
-    """
-    try:
-        # базовый адрес вида https://v.redd.it/<id>
-        base = video_url.rsplit("/", 1)[0]
-        vid_id = base.rsplit("/", 1)[-1]
-
-        tmp = tempfile.gettempdir()
-        video_path = os.path.join(tmp, f"rd_{vid_id}_v.mp4")
-        audio_path = os.path.join(tmp, f"rd_{vid_id}_a.mp4")
-        out_path = os.path.join(tmp, f"rd_{vid_id}.mp4")
-
-        # 1) читаем манифест и узнаём реальные имена дорожек
-        v_name, a_name = _parse_dash_playlist(base, permalink)
-
-        # 2) определяем URL видеодорожки
-        if v_name:
-            video_track_url = f"{base}/{v_name}"
-        else:
-            # манифест не прочитался — используем fallback_url как есть
-            video_track_url = video_url
-
-        # 3) качаем видеодорожку (Referer = ссылка на пост!)
-        if not _download_to(video_track_url, video_path, referer=permalink):
-            logger.warning("Не удалось скачать видеопоток: %s", video_track_url)
-            return None
-
-        # 4) качаем аудиодорожку, если она есть в манифесте
-        audio_ok = False
-        if a_name:
-            audio_ok = _download_to(f"{base}/{a_name}", audio_path,
-                                    referer=permalink)
-
-        # 5) есть аудио и есть ffmpeg — склеиваем
-        if audio_ok and _has_ffmpeg():
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", video_path, "-i", audio_path,
-                     "-c", "copy", "-loglevel", "error", out_path],
-                    check=True,
-                )
-                for p in (video_path, audio_path):
-                    if os.path.exists(p):
-                        os.remove(p)
-                if os.path.exists(out_path) and \
-                        os.path.getsize(out_path) <= MAX_FILE_SIZE:
-                    return out_path
-                return None
-            except Exception:
-                logger.exception("Ошибка склейки ffmpeg для %s", video_url)
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
-                return video_path if os.path.exists(video_path) else None
-
-        # 6) аудио нет (немое видео) или нет ffmpeg — отдаём только видео
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-        if os.path.exists(video_path) and \
-                os.path.getsize(video_path) <= MAX_FILE_SIZE:
-            return video_path
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(post_url, download=True)
+            path = ydl.prepare_filename(info)
+            if not os.path.exists(path):
+                base, _ = os.path.splitext(path)
+                if os.path.exists(base + ".mp4"):
+                    path = base + ".mp4"
+        if os.path.exists(path) and os.path.getsize(path) <= MAX_FILE_SIZE:
+            return path
+        if os.path.exists(path):
+            os.remove(path)
+        logger.warning("Видео превысило лимит размера: %s", post_url)
         return None
     except Exception:
-        logger.exception("Ошибка скачивания видео: %s", video_url)
+        logger.exception("Ошибка скачивания видео: %s", post_url)
         return None
 
 
 def fetch_new_media(subreddit_url: str, seen: list,
                     sort: str = None, period: str = None,
                     on_progress=None) -> list:
-    """
-    Возвращает список (uid, путь_к_файлу) для новых медиа.
-    on_progress(stage, done, total) — необязательный callback прогресса.
-    """
     def report(stage, done, total):
         if on_progress:
             on_progress(stage, done, total)
@@ -447,7 +282,7 @@ def fetch_new_media(subreddit_url: str, seen: list,
         if it["type"] == "photo":
             path = _download_image(it["url"])
         else:
-            path = _download_video(it["url"], it.get("permalink"))
+            path = _download_video(it["permalink"])
         if path:
             result.append((it["id"], path))
         report("download", i, total)

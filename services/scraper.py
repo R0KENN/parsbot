@@ -7,7 +7,9 @@ from urllib.parse import urljoin, urlparse
 from playwright.sync_api import sync_playwright
 
 import requests
+import yt_dlp
 from bs4 import BeautifulSoup
+
 
 from config import MAX_FILES_PER_RUN, DOWNLOAD_DELAY, MAX_FILE_SIZE
 
@@ -94,6 +96,46 @@ def find_media_urls(page_url: str) -> list:
 
     return urls
 
+def download_video_with_ytdlp(page_url: str) -> str | None:
+    """
+    Пробует скачать видео со страницы через yt-dlp.
+    Работает для сайтов, которые yt-dlp поддерживает (их сотни).
+    Возвращает путь к файлу или None, если видео нет/не скачалось.
+    """
+    import hashlib
+    tmp = tempfile.gettempdir()
+    uniq = hashlib.md5(page_url.encode()).hexdigest()[:8]
+    out_tmpl = os.path.join(tmp, f"sc_{uniq}_%(id)s.%(ext)s")
+
+    ydl_opts = {
+        "outtmpl": out_tmpl,
+        "format": "bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+        "retries": 3,
+        "http_headers": {"User-Agent": HEADERS["User-Agent"]},
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(page_url, download=True)
+            path = ydl.prepare_filename(info)
+            if not os.path.exists(path):
+                base, _ = os.path.splitext(path)
+                if os.path.exists(base + ".mp4"):
+                    path = base + ".mp4"
+        if os.path.exists(path) and os.path.getsize(path) <= MAX_FILE_SIZE:
+            return path
+        if os.path.exists(path):
+            os.remove(path)
+        return None
+    except Exception:
+        # это нормально: если на странице нет видео, yt-dlp бросает ошибку
+        logger.info("yt-dlp не нашёл видео на странице: %s", page_url)
+        return None
 
 def download_file(url: str) -> str | None:
     """Скачивает файл во временную папку. Возвращает путь или None."""
@@ -135,8 +177,17 @@ def fetch_new_media(page_url: str, seen: list, on_progress=None) -> list:
             on_progress(stage, done, total)
 
     report("search", 0, 0)
-    all_urls = find_media_urls(page_url)
     seen_set = set(seen)
+    result = []
+
+    # Сначала пробуем скачать видео со САМОЙ страницы через yt-dlp
+    if page_url not in seen_set:
+        video_path = download_video_with_ytdlp(page_url)
+        if video_path:
+            result.append((page_url, video_path))
+
+    # Потом собираем картинки (старая логика)
+    all_urls = find_media_urls(page_url)
     new_urls = [u for u in all_urls if u not in seen_set]
     if MAX_FILES_PER_RUN:
         new_urls = new_urls[:MAX_FILES_PER_RUN]
@@ -144,7 +195,6 @@ def fetch_new_media(page_url: str, seen: list, on_progress=None) -> list:
     total = len(new_urls)
     report("search_done", total, total)
 
-    result = []
     for i, url in enumerate(new_urls, start=1):
         path = download_file(url)
         if path:

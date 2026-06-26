@@ -8,6 +8,8 @@ import requests
 import yt_dlp
 from playwright.sync_api import sync_playwright
 
+from services.http import make_session, DEFAULT_TIMEOUT
+
 from config import (
     REDDIT_LIMIT,
     REDDIT_DEFAULT_SORT, REDDIT_DEFAULT_PERIOD,
@@ -31,6 +33,14 @@ HEADERS = {
 
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
+_SESSION = None
+
+
+def _session():
+    global _SESSION
+    if _SESSION is None:
+        _SESSION = make_session(HEADERS["User-Agent"])
+    return _SESSION
 
 def is_reddit_url(url: str) -> bool:
     return "reddit.com/r/" in url.lower()
@@ -105,8 +115,8 @@ def _fetch_listing(subreddit: str, sort: str, period: str) -> list:
         url = f"{host}/r/{subreddit}/{sort}.json"
         for attempt in range(3):
             try:
-                resp = requests.get(url, headers=HEADERS,
-                                    params=params, timeout=30)
+                resp = _session().get(url, headers=HEADERS,
+                                      params=params, timeout=DEFAULT_TIMEOUT)
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", 5))
                     logger.warning("429 от %s, ждём %s сек", host, wait)
@@ -184,8 +194,9 @@ def _download_image(url: str) -> str | None:
         "Accept-Language": "en-US,en;q=0.9",
     }
     try:
-        resp = requests.get(url, headers=img_headers, timeout=60,
-                            stream=True, allow_redirects=True)
+        resp = _session().get(url, headers=img_headers,
+                              timeout=DEFAULT_TIMEOUT,
+                              stream=True, allow_redirects=True)
         if "reddit.com/media" in resp.url:
             logger.warning("Картинка ушла в редирект на media: %s", url)
             return None
@@ -229,8 +240,8 @@ def _download_video(post_url: str) -> str | None:
         "http_headers": {"User-Agent": HEADERS["User-Agent"]},
     }
 
-    if os.path.exists(REDDIT_COOKIES_PATH):
-        ydl_opts["cookiefile"] = REDDIT_COOKIES_PATH
+    from services.http import apply_cookies
+    apply_cookies(ydl_opts, REDDIT_COOKIES_PATH)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -245,7 +256,15 @@ def _download_video(post_url: str) -> str | None:
                     path = base + ".mp4"
         if os.path.exists(path) and os.path.getsize(path) <= MAX_FILE_SIZE:
             return path
+        # больше лимита — пробуем сжать (если включено)
         if os.path.exists(path):
+            from config import COMPRESS_BIG_VIDEOS
+            if COMPRESS_BIG_VIDEOS:
+                from services.transcode import compress_video
+                smaller = compress_video(path, MAX_FILE_SIZE)
+                if smaller:
+                    os.remove(path)
+                    return smaller
             os.remove(path)
         logger.warning("Видео превысило лимит размера: %s", post_url)
         return None

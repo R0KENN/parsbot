@@ -10,12 +10,23 @@ import requests
 import yt_dlp
 from bs4 import BeautifulSoup
 
+from services.http import make_session, DEFAULT_TIMEOUT
+
 
 from config import MAX_FILES_PER_RUN, DOWNLOAD_DELAY, MAX_FILE_SIZE, SITE_COOKIES_PATH
 
 logger = logging.getLogger(__name__)
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MediaBot/1.0)"}
+
+_SESSION = None
+
+
+def _session():
+    global _SESSION
+    if _SESSION is None:
+        _SESSION = make_session(HEADERS["User-Agent"])
+    return _SESSION
 
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 VIDEO_EXT = (".mp4", ".webm", ".mov", ".m3u8", ".mpd")
@@ -167,6 +178,13 @@ def _resolve_ytdlp_path(ydl, entry) -> str | None:
     if os.path.exists(path):
         if os.path.getsize(path) <= MAX_FILE_SIZE:
             return path
+        from config import COMPRESS_BIG_VIDEOS
+        if COMPRESS_BIG_VIDEOS:
+            from services.transcode import compress_video
+            smaller = compress_video(path, MAX_FILE_SIZE)
+            if smaller:
+                os.remove(path)
+                return smaller
         os.remove(path)  # слишком большое для Telegram
         logger.info("Видео превысило лимит размера: %s", path)
     return None
@@ -197,8 +215,8 @@ def download_videos_with_ytdlp(page_url: str, allow_playlist: bool = True) -> li
     }
     if MAX_FILES_PER_RUN:
         ydl_opts["playlistend"] = MAX_FILES_PER_RUN
-    if os.path.exists(SITE_COOKIES_PATH):
-        ydl_opts["cookiefile"] = SITE_COOKIES_PATH
+    from services.http import apply_cookies
+    apply_cookies(ydl_opts, SITE_COOKIES_PATH)
 
     paths = []
     try:
@@ -234,7 +252,8 @@ def download_video_with_ytdlp(page_url: str) -> str | None:
 def download_file(url: str) -> str | None:
     """Скачивает файл во временную папку. Возвращает путь или None."""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=60, stream=True)
+        resp = _session().get(url, headers=HEADERS,
+                              timeout=DEFAULT_TIMEOUT, stream=True)
         resp.raise_for_status()
 
         size = int(resp.headers.get("Content-Length", 0))

@@ -62,3 +62,20 @@ SITE_COOKIES_PATH = os.path.join(os.path.dirname(__file__), "site_cookies.txt")
 
 # Сколько медиа можно слать одним альбомом (Telegram-лимит = 10)
 ALBUM_SIZE = 10
+
+# ===== Доп. настройки: anti-flood, admin, cookies, видео =====
+
+# ID владельца бота для уведомлений об ошибках (узнать у @userinfobot).
+ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
+
+# Анти-флуд: минимальная пауза (сек) между действиями одного юзера.
+THROTTLE_RATE = 0.7
+
+# Брать cookies из браузера для yt-dlp: "chrome"/"firefox"/"edge"/"" (выкл).
+COOKIES_FROM_BROWSER = os.getenv("COOKIES_FROM_BROWSER", "").strip()
+
+# Сжимать видео > лимита Telegram через ffmpeg, а не выбрасывать.
+COMPRESS_BIG_VIDEOS = os.getenv("COMPRESS_BIG_VIDEOS", "1") == "1"
+
+# Свежесть yt-dlp: старше N дней — health_check предупредит.
+YTDLP_MAX_AGE_DAYS = 45

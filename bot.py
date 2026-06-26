@@ -29,6 +29,25 @@ def health_check():
             "авторизации. См. инструкцию по reddit_cookies.txt",
             REDDIT_COOKIES_PATH)
 
+    # Свежесть yt-dlp — старый быстро ломается на сайтах
+    try:
+        import datetime
+        import yt_dlp
+        from config import YTDLP_MAX_AGE_DAYS
+        ver = getattr(yt_dlp.version, "__version__", "0000.00.00")
+        try:
+            y, m, d = (int(x) for x in ver.split(".")[:3])
+            age = (datetime.date.today() - datetime.date(y, m, d)).days
+            if age > YTDLP_MAX_AGE_DAYS:
+                logging.warning(
+                    "yt-dlp устарел (версия %s, %s дней) — обнови: "
+                    "pip install -U yt-dlp", ver, age)
+            else:
+                logging.info("yt-dlp версия %s — свежая, ок", ver)
+        except Exception:
+            logging.info("yt-dlp версия %s", ver)
+    except Exception:
+        logging.warning("Не удалось определить версию yt-dlp")
 
 
 def cleanup_temp(max_age_hours: float = 6.0):
@@ -97,6 +116,8 @@ async def set_commands(bot: Bot):
         BotCommand(command="start", description="Запустить бота / меню"),
         BotCommand(command="menu", description="Главное меню"),
         BotCommand(command="cancel", description="Отменить текущее действие"),
+        BotCommand(command="stats", description="Статистика"),
+        BotCommand(command="health", description="Состояние бота"),
     ])
 
 
@@ -107,6 +128,10 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
+    from middlewares.throttling import ThrottlingMiddleware
+    dp.message.middleware(ThrottlingMiddleware())
+    dp.callback_query.middleware(ThrottlingMiddleware())
+
     dp.include_router(commands.router)
     dp.include_router(callbacks.router)
 
@@ -115,8 +140,25 @@ async def main():
     scheduler.start()
     scheduler.reschedule_all(bot)
 
+    async def _on_shutdown():
+        logging.info("Останавливаю бота…")
+        try:
+            scheduler.shutdown()
+        except Exception:
+            logging.exception("Ошибка при остановке планировщика")
+        try:
+            await bot.session.close()
+        except Exception:
+            logging.exception("Ошибка при закрытии сессии бота")
+        logging.info("Бот остановлен корректно")
+
+    dp.shutdown.register(_on_shutdown)
+
     logging.info("Бот запущен")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Получен сигнал остановки")
 
 
 if __name__ == "__main__":

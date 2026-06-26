@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # пробрось cookies, если используешь
+      - ./reddit_cookies.txt:/app/reddit_cookies.txt:ro
+      - ./site_cookies.txt:/app/site_cookies.txt:ro
+      - ./reddit_state.json:/app/reddit_state.json:ro

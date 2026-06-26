@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramRetryAfter, TelegramNetworkError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import (
-    SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE, ALBUM_SIZE,
+    SEND_DELAY, PROGRESS_EVERY, MAX_PHOTO_SIZE, ALBUM_SIZE, ADMIN_ID,
 )
 from services import storage, scraper, reddit
 
@@ -21,7 +21,26 @@ scheduler = AsyncIOScheduler()
 
 VIDEO_EXT = (".mp4", ".webm", ".mov")
 
+async def notify_admin(bot, text: str):
+    """Шлёт краткий алерт владельцу бота, если задан ADMIN_ID."""
+    if not ADMIN_ID:
+        return
+    try:
+        await bot.send_message(ADMIN_ID, f"🛑 {text}")
+    except Exception:
+        pass
 
+def _file_hash(path: str) -> str | None:
+    """Хэш содержимого файла для дедупликации (sha1 по всему файлу)."""
+    import hashlib
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
 
 def _safe_remove(path: str, attempts: int = 5, delay: float = 0.5) -> None:
     """
@@ -293,6 +312,7 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
         state["active"] = False
         paint_task.cancel()
         await _safe_edit(status, f"📡 {url}\n\n⚠️ Ошибка: {e}", cache)
+        await notify_admin(bot, f"Ошибка проверки {url}\nuser={user_id}\n{e}")
         if pinned:
             try:
                 await bot.unpin_chat_message(user_id, status.message_id)
@@ -315,6 +335,37 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
                 pass
         return
 
+    # --- дедуп по содержимому: выкидываем файлы-дубликаты ---
+    known_hashes = storage.get_seen_hashes(user_id, site_id)
+    deduped = []
+    batch_hashes = set()
+    new_hashes_to_save = []
+    for (u, p) in new_media:
+        h = _file_hash(p)
+        if h and (h in known_hashes or h in batch_hashes):
+            _safe_remove(p)          # дубликат — удаляем, не шлём
+            continue
+        if h:
+            batch_hashes.add(h)
+            new_hashes_to_save.append(h)
+        deduped.append((u, p))
+    new_media = deduped
+    total = len(new_media)
+
+    if not total:
+        state["stage"] = "search_done"
+        state["done"] = state["total"] = 0
+        state["active"] = False
+        paint_task.cancel()
+        await _safe_edit(status, f"📡 {url}\n\n🔍 Новых медиа нет "
+                                 "(всё уже было).", cache)
+        if pinned:
+            try:
+                await bot.unpin_chat_message(user_id, status.message_id)
+            except Exception:
+                pass
+        return
+
     # --- выгрузка альбомами с прогрессом ---
     state["stage"] = "upload"
     state["total"] = total
@@ -327,9 +378,17 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
         # дёргается после каждого отправленного файла — двигает прогресс-бар
         state["done"] = min(base_done + _n, total)
 
+    # путь -> хэш, чтобы сохранить хэши только реально отправленных
+    _path_hashes = {}
+    for (_u, _p) in new_media:
+        _h = _file_hash(_p)
+        if _h:
+            _path_hashes[_p] = _h
+
     for start in range(0, total, ALBUM_SIZE):
         chunk = new_media[start:start + ALBUM_SIZE]
         paths = [p for (_u, p) in chunk]
+        _chunk_hashes = {p: _path_hashes.get(p) for (_u, p) in chunk}
 
         sent_paths = await _send_album(bot, user_id, paths, on_sent=on_sent)
         sent_set = set(sent_paths)
@@ -342,6 +401,9 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
         for (u, p) in chunk:
             if p in sent_set:
                 storage.mark_seen(user_id, site_id, [u])
+                h = _chunk_hashes.get(p)
+                if h:
+                    storage.mark_seen_hashes(user_id, site_id, [h])
 
         for (_u, p) in chunk:
             _safe_remove(p)
@@ -405,3 +467,7 @@ def reschedule_all(bot: Bot):
 def start():
     if not scheduler.running:
         scheduler.start()
+
+def shutdown():
+    if scheduler.running:
+        scheduler.shutdown(wait=False)

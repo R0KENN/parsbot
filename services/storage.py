@@ -51,8 +51,14 @@ def _load():
 
 
 def _save(data):
-    with open(STORAGE_PATH, "w", encoding="utf-8") as f:
+    # пишем во временный файл и заменяем атомарно — файл не побьётся при сбое
+    os.makedirs(os.path.dirname(STORAGE_PATH), exist_ok=True)
+    tmp_path = STORAGE_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, STORAGE_PATH)
 
 
 def get_user(user_id: int) -> dict:
@@ -156,6 +162,31 @@ def mark_seen(user_id: int, site_id: str, urls: list):
             _save(data)
             return
 
+def get_seen_hashes(user_id: int, site_id: str) -> set:
+    """Множество хэшей уже отправленных файлов (дедуп по содержимому)."""
+    site = get_site(user_id, site_id)
+    if not site:
+        return set()
+    return set(site.get("seen_hashes", []))
+
+
+def mark_seen_hashes(user_id: int, site_id: str, hashes: list):
+    user_id = str(user_id)
+    with _lock:
+        data = _load()
+        sites = data["users"].get(user_id, {}).get("sites", [])
+        for site in sites:
+            if site["id"] != site_id:
+                continue
+            existing = site.get("seen_hashes", [])
+            existing_set = set(existing)
+            for h in hashes:
+                if h and h not in existing_set:
+                    existing.append(h)
+                    existing_set.add(h)
+            site["seen_hashes"] = existing[-SEEN_LIMIT:]
+            _save(data)
+            return
 
 def all_users() -> dict:
     """Все пользователи и их сайты — нужно планировщику при старте."""

@@ -51,7 +51,7 @@ REDDIT_DEFAULT_PERIOD = "day"
 import tempfile as _tempfile
 REDDIT_TMP = _tempfile.gettempdir()
 
-# Путь к базе планировщика (чтобы задачи переживали перезапуск бота)
+# (Не используется — задачи восстанавливаются из storage.json через reschedule_all)
 JOBS_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "jobs.sqlite")
 
 # Путь к cookies для yt-dlp (видео Reddit). Если файла нет — качаем без него.

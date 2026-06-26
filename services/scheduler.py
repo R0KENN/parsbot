@@ -68,7 +68,8 @@ async def _safe_edit(status, text: str, cache: dict):
 async def _send_album(bot, user_id, batch):
     """
     Шлёт пачку медиа одним альбомом (до ALBUM_SIZE штук).
-    batch — список путей к файлам. Возвращает кол-во успешно отправленных.
+    batch — список путей к файлам.
+    Возвращает список путей, которые реально были отправлены.
     """
     media = []
     for path in batch:
@@ -81,17 +82,17 @@ async def _send_album(bot, user_id, batch):
     while True:
         try:
             await bot.send_media_group(user_id, media)
-            return len(batch)
+            return list(batch)
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except Exception:
             # альбом не ушёл целиком — пробуем по одному, чтобы не терять всё
-            ok = 0
+            sent = []
             for path in batch:
                 if await _send_one(bot, user_id, path):
-                    ok += 1
+                    sent.append(path)
                 await asyncio.sleep(SEND_DELAY)
-            return ok
+            return sent
 
 
 async def run_site_check(bot, user_id: int, site_id: str):
@@ -200,12 +201,15 @@ async def run_site_check(bot, user_id: int, site_id: str):
         chunk = new_media[start:start + ALBUM_SIZE]
         paths = [p for (_u, p) in chunk]
 
-        ok = await _send_album(bot, user_id, paths)
-        sent_count += ok
+        sent_paths = await _send_album(bot, user_id, paths)
+        sent_set = set(sent_paths)
+        sent_count += len(sent_paths)
         state["done"] = min(start + len(chunk), total)
 
-        for (u, _p) in chunk[:ok]:
-            storage.mark_seen(user_id, site_id, [u])
+        for (u, p) in chunk:
+            if p in sent_set:
+                storage.mark_seen(user_id, site_id, [u])
+
         for (_u, p) in chunk:
             if os.path.exists(p):
                 os.remove(p)

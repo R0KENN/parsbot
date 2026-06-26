@@ -105,8 +105,10 @@ def download_file(url: str) -> str | None:
         if size and size > MAX_FILE_SIZE:
             return None
 
+        import hashlib
         name = os.path.basename(urlparse(url).path) or "file"
-        path = os.path.join(tempfile.gettempdir(), f"mb_{name}")
+        uniq = hashlib.md5(url.encode()).hexdigest()[:8]
+        path = os.path.join(tempfile.gettempdir(), f"mb_{uniq}_{name}")
 
         downloaded = 0
         with open(path, "wb") as f:

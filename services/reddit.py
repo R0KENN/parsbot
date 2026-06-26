@@ -172,7 +172,7 @@ def _extract_media_from_post(post: dict) -> list:
             items.append({
                 "id": post_id,
                 "type": "video",
-                "url": fallback.split("?")[0],  # чистим query, оставляем DASH_xxx.mp4
+                "url": fallback,  # полный URL с токеном — нужен для fallback-скачивания
                 "permalink": permalink,
             })
         return items
@@ -226,8 +226,10 @@ def _download_image(url: str) -> str | None:
             logger.warning("Картинка ушла в редирект на media: %s", url)
             return None
         resp.raise_for_status()
+        import hashlib
         name = os.path.basename(url.split("?")[0]) or "img.jpg"
-        path = os.path.join(tempfile.gettempdir(), f"rd_{name}")
+        uniq = hashlib.md5(url.encode()).hexdigest()[:8]
+        path = os.path.join(tempfile.gettempdir(), f"rd_{uniq}_{name}")
         downloaded = 0
         with open(path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
@@ -243,35 +245,107 @@ def _download_image(url: str) -> str | None:
         return None
 
 
-# Возможные имена аудио-дорожки у Reddit (порядок = приоритет качества).
-# Reddit менял схему: сначала DASH_audio.mp4, теперь DASH_AUDIO_<rate>.mp4.
-_AUDIO_NAMES = ("DASH_AUDIO_128.mp4", "DASH_AUDIO_64.mp4", "DASH_audio.mp4")
+import xml.etree.ElementTree as ET
 
 
-def _download_to(url: str, path: str) -> bool:
-    """Качает один файл по прямой ссылке. True — успех."""
+def _download_to(url: str, path: str, referer: str = None) -> bool:
+    """Качает один файл по прямой ссылке. True — успех.
+    Для v.redd.it нужен корректный Referer и БЕЗ сжатия (br ломает mp4)."""
+    headers = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        # НЕ просим br/gzip для бинарного файла — иначе поток может побиться
+        "Accept-Encoding": "identity",
+        "Referer": referer or "https://www.reddit.com/",
+    }
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=60, stream=True)
+        resp = requests.get(url, headers=headers, timeout=120, stream=True)
         if resp.status_code != 200:
+            logger.warning("HTTP %s при скачивании %s", resp.status_code, url)
             return False
         downloaded = 0
         with open(path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
+            for chunk in resp.iter_content(chunk_size=1 << 16):
+                if not chunk:
+                    continue
                 downloaded += len(chunk)
                 if downloaded > MAX_FILE_SIZE:
                     f.close()
                     os.remove(path)
+                    logger.warning("Файл превысил лимит размера: %s", url)
                     return False
                 f.write(chunk)
         return os.path.exists(path) and os.path.getsize(path) > 0
     except Exception:
+        logger.exception("Ошибка скачивания файла: %s", url)
         return False
 
 
-def _download_video(video_url: str) -> str | None:
+# Пространство имён в манифесте MPEG-DASH
+_MPD_NS = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
+
+
+def _parse_dash_playlist(base: str, permalink: str):
     """
-    Качает reddit-видео напрямую: отдельно видео (fallback_url) и аудио,
-    затем склеивает через ffmpeg. Не зависит от yt-dlp/cookies.
+    Скачивает и разбирает DASHPlaylist.mpd сабреддит-видео.
+    Возвращает (video_name, audio_name|None) — РЕАЛЬНЫЕ имена дорожек,
+    взятые из манифеста, а не угаданные.
+    base — https://v.redd.it/<id>
+    """
+    mpd_url = f"{base}/DASHPlaylist.mpd"
+    headers = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "application/dash+xml,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
+        "Referer": permalink or "https://www.reddit.com/",
+    }
+    try:
+        resp = requests.get(mpd_url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            logger.warning("MPD недоступен (HTTP %s): %s",
+                           resp.status_code, mpd_url)
+            return None, None
+        root = ET.fromstring(resp.content)
+    except Exception:
+        logger.exception("Не удалось разобрать DASHPlaylist.mpd: %s", mpd_url)
+        return None, None
+
+    best_video = None
+    best_video_h = -1
+    best_audio = None
+    best_audio_br = -1
+
+    for adapt in root.iter("{urn:mpeg:dash:schema:mpd:2011}AdaptationSet"):
+        ctype = (adapt.get("contentType") or adapt.get("mimeType") or "").lower()
+        for rep in adapt.findall("mpd:Representation", _MPD_NS):
+            # имя файла дорожки лежит в BaseURL
+            base_url_el = rep.find("mpd:BaseURL", _MPD_NS)
+            if base_url_el is None or not base_url_el.text:
+                continue
+            name = base_url_el.text.strip()
+            mime = (rep.get("mimeType") or ctype).lower()
+
+            if "video" in mime or "video" in ctype:
+                h = int(rep.get("height") or 0)
+                if h > best_video_h:
+                    best_video_h = h
+                    best_video = name
+            elif "audio" in mime or "audio" in ctype:
+                br = int(rep.get("bandwidth") or 0)
+                if br > best_audio_br:
+                    best_audio_br = br
+                    best_audio = name
+
+    return best_video, best_audio
+
+
+def _download_video(video_url: str, permalink: str = None) -> str | None:
+    """
+    Качает reddit-видео самым надёжным способом: читает DASHPlaylist.mpd,
+    берёт оттуда реальные имена видео- и аудиодорожек, качает их и
+    склеивает через ffmpeg. Не зависит от угадывания имён и от cookies.
     video_url — прямая ссылка вида https://v.redd.it/<id>/DASH_720.mp4
     """
     try:
@@ -284,19 +358,28 @@ def _download_video(video_url: str) -> str | None:
         audio_path = os.path.join(tmp, f"rd_{vid_id}_a.mp4")
         out_path = os.path.join(tmp, f"rd_{vid_id}.mp4")
 
-        # 1) качаем видеодорожку
-        if not _download_to(video_url, video_path):
-            logger.warning("Не удалось скачать видеопоток: %s", video_url)
+        # 1) читаем манифест и узнаём реальные имена дорожек
+        v_name, a_name = _parse_dash_playlist(base, permalink)
+
+        # 2) определяем URL видеодорожки
+        if v_name:
+            video_track_url = f"{base}/{v_name}"
+        else:
+            # манифест не прочитался — используем fallback_url как есть
+            video_track_url = video_url
+
+        # 3) качаем видеодорожку (Referer = ссылка на пост!)
+        if not _download_to(video_track_url, video_path, referer=permalink):
+            logger.warning("Не удалось скачать видеопоток: %s", video_track_url)
             return None
 
-        # 2) пробуем найти и скачать аудиодорожку
+        # 4) качаем аудиодорожку, если она есть в манифесте
         audio_ok = False
-        for name in _AUDIO_NAMES:
-            if _download_to(f"{base}/{name}", audio_path):
-                audio_ok = True
-                break
+        if a_name:
+            audio_ok = _download_to(f"{base}/{a_name}", audio_path,
+                                    referer=permalink)
 
-        # 3a) есть аудио и есть ffmpeg — склеиваем
+        # 5) есть аудио и есть ffmpeg — склеиваем
         if audio_ok and _has_ffmpeg():
             try:
                 subprocess.run(
@@ -304,7 +387,6 @@ def _download_video(video_url: str) -> str | None:
                      "-c", "copy", "-loglevel", "error", out_path],
                     check=True,
                 )
-                # подчищаем промежуточные файлы
                 for p in (video_path, audio_path):
                     if os.path.exists(p):
                         os.remove(p)
@@ -314,12 +396,11 @@ def _download_video(video_url: str) -> str | None:
                 return None
             except Exception:
                 logger.exception("Ошибка склейки ffmpeg для %s", video_url)
-                # склейка не удалась — отдадим хотя бы видео без звука
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
                 return video_path if os.path.exists(video_path) else None
 
-        # 3b) аудио нет (немое видео) или нет ffmpeg — отдаём только видео
+        # 6) аудио нет (немое видео) или нет ffmpeg — отдаём только видео
         if os.path.exists(audio_path):
             os.remove(audio_path)
         if os.path.exists(video_path) and \
@@ -366,7 +447,7 @@ def fetch_new_media(subreddit_url: str, seen: list,
         if it["type"] == "photo":
             path = _download_image(it["url"])
         else:
-            path = _download_video(it["url"])
+            path = _download_video(it["url"], it.get("permalink"))
         if path:
             result.append((it["id"], path))
         report("download", i, total)

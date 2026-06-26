@@ -42,14 +42,27 @@ async def _send_one(bot, user_id, path):
             return False
 
 
-def _progress_bar(done: int, total: int, width: int = 10) -> str:
-    """Рисует текстовый прогресс-бар вида ▓▓▓▓░░░░░░ 40%."""
+def _progress_bar(done: int, total: int, width: int = 12) -> str:
+    """Рисует прогресс-бар вида ▰▰▰▰▱▱▱▱ 50% (12/24)."""
     if total <= 0:
-        return ""
-    ratio = done / total
+        return "▱" * width + " 0%"
+    ratio = min(done / total, 1.0)
     filled = int(ratio * width)
-    bar = "▓" * filled + "░" * (width - filled)
-    return f"{bar} {int(ratio * 100)}%"
+    bar = "▰" * filled + "▱" * (width - filled)
+    return f"{bar} {int(ratio * 100)}% ({done}/{total})"
+
+
+async def _safe_edit(status, text: str, cache: dict):
+    """Редактирует сообщение, гася ошибки Telegram о повторе/частоте."""
+    if text == cache.get("last"):
+        return
+    try:
+        await status.edit_text(text)
+        cache["last"] = text
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after + 1)
+    except Exception:
+        pass
 
 
 async def _send_album(bot, user_id, batch):
@@ -82,40 +95,24 @@ async def _send_album(bot, user_id, batch):
 
 
 async def run_site_check(bot, user_id: int, site_id: str):
-    """Проверяет один сайт и отправляет новые медиа пользователю."""
+    """Проверяет один сайт с живым многостадийным прогресс-баром."""
     site = storage.get_site(user_id, site_id)
     if site is None:
         return
 
-    try:
-        if reddit.is_reddit_url(site["url"]):
-            new_media = await asyncio.to_thread(
-                reddit.fetch_new_media, site["url"], site["seen"],
-                site.get("sort", "new"), site.get("period", "day"))
-        else:
-            new_media = await asyncio.to_thread(
-                scraper.fetch_new_media, site["url"], site["seen"])
-    except PermissionError:
-        await bot.send_message(
-            user_id, f"⚠️ robots.txt запрещает доступ к {site['url']}")
-        return
-    except Exception as e:
-        await bot.send_message(user_id, f"⚠️ Ошибка при {site['url']}: {e}")
-        return
+    url = site["url"]
+    cache = {"last": None}
 
-    if not new_media:
-        return
+    # общее состояние, которое обновляет фоновый поток
+    state = {"stage": "search", "done": 0, "total": 0, "active": True}
 
-    total = len(new_media)
+    def on_progress(stage, done, total):
+        state["stage"] = stage
+        state["done"] = done
+        state["total"] = total
 
-    status = await bot.send_message(
-        user_id,
-        f"📥 {site['url']}\n"
-        f"Найдено {total} новых медиа.\n"
-        f"{_progress_bar(0, total)}\n"
-        f"Отправлено 0 из {total}"
-    )
-
+    # отдельное закреплённое сообщение — только прогресс-бар
+    status = await bot.send_message(user_id, "🔍 Запускаю проверку…")
     try:
         await bot.pin_chat_message(
             user_id, status.message_id, disable_notification=True)
@@ -123,59 +120,113 @@ async def run_site_check(bot, user_id: int, site_id: str):
     except Exception:
         pinned = False
 
-    sent_count = 0
-    processed = 0
-    last_text = None
+    def render() -> str:
+        stage = state["stage"]
+        done, total = state["done"], state["total"]
+        foot = f"\n\n📡 {url}"
+        if stage == "search":
+            return "🔍 Ищу новые медиа…" + foot
+        if stage in ("search_done", "download"):
+            if total == 0:
+                return "🔍 Поиск завершён.\nНовых медиа нет." + foot
+            return (f"⬇️ Скачивание\n{_progress_bar(done, total)}" + foot)
+        if stage == "upload":
+            return (f"⬆️ Выгрузка в Telegram\n{_progress_bar(done, total)}"
+                    + foot)
+        return "✅ Готово!" + foot
 
-    # шлём альбомами по ALBUM_SIZE
+    # фоновая задача-художник: раз в секунду перерисовывает сообщение
+    async def painter():
+        while state["active"]:
+            await _safe_edit(status, render(), cache)
+            await asyncio.sleep(1.0)
+
+    paint_task = asyncio.create_task(painter())
+
+    # --- поиск + скачивание (в потоке, с прогрессом) ---
+    try:
+        if reddit.is_reddit_url(url):
+            new_media = await asyncio.to_thread(
+                reddit.fetch_new_media, url, site["seen"],
+                site.get("sort", "new"), site.get("period", "day"),
+                on_progress)
+        else:
+            new_media = await asyncio.to_thread(
+                scraper.fetch_new_media, url, site["seen"], on_progress)
+    except PermissionError:
+        state["active"] = False
+        paint_task.cancel()
+        await _safe_edit(status, f"📡 {url}\n\n⚠️ robots.txt запрещает доступ",
+                         cache)
+        if pinned:
+            try:
+                await bot.unpin_chat_message(user_id, status.message_id)
+            except Exception:
+                pass
+        return
+    except Exception as e:
+        state["active"] = False
+        paint_task.cancel()
+        await _safe_edit(status, f"📡 {url}\n\n⚠️ Ошибка: {e}", cache)
+        if pinned:
+            try:
+                await bot.unpin_chat_message(user_id, status.message_id)
+            except Exception:
+                pass
+        return
+
+    total = len(new_media)
+
+    if not total:
+        state["stage"] = "search_done"
+        state["done"] = state["total"] = 0
+        state["active"] = False
+        paint_task.cancel()
+        await _safe_edit(status, f"📡 {url}\n\n🔍 Новых медиа нет.", cache)
+        if pinned:
+            try:
+                await bot.unpin_chat_message(user_id, status.message_id)
+            except Exception:
+                pass
+        return
+
+    # --- выгрузка альбомами с прогрессом ---
+    state["stage"] = "upload"
+    state["total"] = total
+    state["done"] = 0
+
+    sent_count = 0
     for start in range(0, total, ALBUM_SIZE):
         chunk = new_media[start:start + ALBUM_SIZE]
-        paths = [p for (_url, p) in chunk]
+        paths = [p for (_u, p) in chunk]
 
         ok = await _send_album(bot, user_id, paths)
         sent_count += ok
-        processed += len(chunk)
+        state["done"] = min(start + len(chunk), total)
 
-        # отмечаем отправленными ровно столько, сколько ушло
-        for (url, _p) in chunk[:ok]:
-            storage.mark_seen(user_id, site_id, [url])
-
-        # чистим временные файлы пачки
-        for (_url, p) in chunk:
+        for (u, _p) in chunk[:ok]:
+            storage.mark_seen(user_id, site_id, [u])
+        for (_u, p) in chunk:
             if os.path.exists(p):
                 os.remove(p)
 
-        # обновляем прогресс
-        new_text = (
-            f"📥 {site['url']}\n"
-            f"Найдено {total} новых медиа.\n"
-            f"{_progress_bar(processed, total)}\n"
-            f"Отправлено {sent_count} из {processed}"
-        )
-        if new_text != last_text:
-            try:
-                await status.edit_text(new_text)
-                last_text = new_text
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
-            except Exception:
-                pass
-
         await asyncio.sleep(SEND_DELAY)
+
+    # --- завершение ---
+    state["stage"] = "done"
+    state["active"] = False
+    paint_task.cancel()
 
     skipped = total - sent_count
     final = (
         f"✅ Готово!\n"
-        f"📥 {site['url']}\n"
         f"{_progress_bar(total, total)}\n"
         f"Отправлено {sent_count} из {total}"
     )
     if skipped > 0:
         final += f"\n⚠️ Пропущено {skipped} (слишком большие или ошибка)"
-    try:
-        await status.edit_text(final)
-    except Exception:
-        pass
+    final += f"\n\n📡 {url}"
+    await _safe_edit(status, final, cache)
 
     if pinned:
         try:

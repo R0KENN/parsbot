@@ -300,11 +300,16 @@ def _download_video(post_url: str) -> str | None:
 
 
 def fetch_new_media(subreddit_url: str, seen: list,
-                    sort: str = None, period: str = None) -> list:
+                    sort: str = None, period: str = None,
+                    on_progress=None) -> list:
     """
-    Совместима по смыслу со scraper.fetch_new_media, плюс sort/period.
     Возвращает список (uid, путь_к_файлу) для новых медиа.
+    on_progress(stage, done, total) — необязательный callback прогресса.
     """
+    def report(stage, done, total):
+        if on_progress:
+            on_progress(stage, done, total)
+
     sort = sort or REDDIT_DEFAULT_SORT
     period = period or REDDIT_DEFAULT_PERIOD
 
@@ -312,6 +317,7 @@ def fetch_new_media(subreddit_url: str, seen: list,
     if not name:
         raise ValueError("Не удалось распознать сабреддит в ссылке")
 
+    report("search", 0, 0)
     posts = _fetch_listing(name, sort, period)
     seen_set = set(seen)
 
@@ -320,13 +326,16 @@ def fetch_new_media(subreddit_url: str, seen: list,
         all_items.extend(_extract_media_from_post(post))
 
     new_items = [it for it in all_items if it["id"] not in seen_set]
+    total = len(new_items)
+    report("search_done", total, total)
 
     result = []
-    for it in new_items:
+    for i, it in enumerate(new_items, start=1):
         if it["type"] == "photo":
             path = _download_image(it["url"])
         else:
             path = _download_video(it["url"])
         if path:
             result.append((it["id"], path))
+        report("download", i, total)
     return result

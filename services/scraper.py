@@ -3,7 +3,6 @@ import re
 import time
 import logging
 import tempfile
-import urllib.robotparser as robotparser
 from urllib.parse import urljoin, urlparse
 from playwright.sync_api import sync_playwright
 
@@ -23,30 +22,6 @@ MEDIA_EXT = IMAGE_EXT + VIDEO_EXT
 # Суффикс размера в имени превью: ..._300px.jpg, ..._150px.png и т.п.
 # Убираем его, чтобы получить ссылку на оригинал.
 _SIZE_SUFFIX_RE = re.compile(r"_\d+px(?=\.[a-zA-Z0-9]+$)")
-
-
-def _robots_allowed(url: str) -> bool:
-    """
-    Проверяем robots.txt:
-    - файла нет (404) или он пустой -> разрешено;
-    - файл есть -> уважаем его правила;
-    - сервер недоступен / иная ошибка -> разрешено.
-    """
-    try:
-        parsed = urlparse(url)
-        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-        resp = requests.get(robots_url, headers=HEADERS, timeout=10)
-
-        if resp.status_code == 404 or not resp.text.strip():
-            return True
-        if resp.status_code == 200:
-            rp = robotparser.RobotFileParser()
-            rp.parse(resp.text.splitlines())
-            return rp.can_fetch("MediaBot", url)
-        return True
-    except Exception:
-        return True
-
 
 def _thumb_to_original(url: str) -> str:
     """
@@ -84,9 +59,6 @@ def find_media_urls(page_url: str) -> list:
     Собирает превью со страницы галереи и преобразует их в ссылки
     на оригиналы, убирая размерный суффикс из имени файла.
     """
-    if not _robots_allowed(page_url):
-        raise PermissionError("robots.txt запрещает доступ к этой странице")
-
     html = _render_page_html(page_url)
     soup = BeautifulSoup(html, "html.parser")
 
@@ -151,21 +123,30 @@ def download_file(url: str) -> str | None:
         return None
 
 
-def fetch_new_media(page_url: str, seen: list) -> list:
+def fetch_new_media(page_url: str, seen: list, on_progress=None) -> list:
     """
     Возвращает список (url, путь_к_файлу) для новых медиа.
-    Ограничено MAX_FILES_PER_RUN.
+    on_progress(stage, done, total) — необязательный callback прогресса.
     """
+    def report(stage, done, total):
+        if on_progress:
+            on_progress(stage, done, total)
+
+    report("search", 0, 0)
     all_urls = find_media_urls(page_url)
     seen_set = set(seen)
     new_urls = [u for u in all_urls if u not in seen_set]
     if MAX_FILES_PER_RUN:
         new_urls = new_urls[:MAX_FILES_PER_RUN]
 
+    total = len(new_urls)
+    report("search_done", total, total)
+
     result = []
-    for url in new_urls:
+    for i, url in enumerate(new_urls, start=1):
         path = download_file(url)
         if path:
             result.append((url, path))
+        report("download", i, total)
         time.sleep(DOWNLOAD_DELAY)
     return result

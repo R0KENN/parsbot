@@ -1,10 +1,6 @@
 import requests
 from requests.adapters import HTTPAdapter
-
-try:
-    from urllib3.util.retry import Retry
-except Exception:
-    from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 
 
 def make_session(user_agent: str = None) -> requests.Session:

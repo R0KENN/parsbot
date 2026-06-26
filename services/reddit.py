@@ -164,15 +164,17 @@ def _extract_media_from_post(post: dict) -> list:
     post_id = post.get("name") or post.get("id")
     permalink = "https://www.reddit.com" + post.get("permalink", "")
 
-    # 1) Reddit-видео (v.redd.it)
+    # 1) Reddit-видео (v.redd.it) — берём прямую ссылку на видеопоток
     if post.get("is_video") and post.get("media", {}).get("reddit_video"):
-        # для видео отдаём ссылку на сам пост — качать будем через yt-dlp
-        items.append({
-            "id": post_id,
-            "type": "video",
-            "url": permalink,
-            "permalink": permalink,
-        })
+        rv = post["media"]["reddit_video"]
+        fallback = rv.get("fallback_url", "")
+        if fallback:
+            items.append({
+                "id": post_id,
+                "type": "video",
+                "url": fallback.split("?")[0],  # чистим query, оставляем DASH_xxx.mp4
+                "permalink": permalink,
+            })
         return items
 
     # 2) Галерея (несколько фото в посте)
@@ -241,61 +243,91 @@ def _download_image(url: str) -> str | None:
         return None
 
 
-def _download_video(post_url: str) -> str | None:
-    """
-    Качает reddit-видео через yt-dlp. Если есть ffmpeg — со звуком,
-    иначе берём лучший единый прогрессивный формат (часто без звука).
-    """
-    try:
-        import yt_dlp
-    except ImportError:
-        logger.error("yt-dlp не установлен — видео скачать нельзя")
-        return None
+# Возможные имена аудио-дорожки у Reddit (порядок = приоритет качества).
+# Reddit менял схему: сначала DASH_audio.mp4, теперь DASH_AUDIO_<rate>.mp4.
+_AUDIO_NAMES = ("DASH_AUDIO_128.mp4", "DASH_AUDIO_64.mp4", "DASH_audio.mp4")
 
-    has_ffmpeg = _has_ffmpeg()
-    if not has_ffmpeg:
-        logger.warning(
-            "ffmpeg не найден — reddit-видео может не скачаться или быть без звука. "
-            "Установите ffmpeg для корректной работы."
-        )
 
-    out_template = os.path.join(tempfile.gettempdir(), "rd_%(id)s.%(ext)s")
-    ydl_opts = {
-        "outtmpl": out_template,
-        "quiet": True,
-        "no_warnings": True,
-        "format": "bv*+ba/b" if _has_ffmpeg() else "b",
-        "merge_output_format": "mp4",
-        "max_filesize": MAX_FILE_SIZE,
-        "http_headers": HEADERS,
-        # cookies подхватываются, только если файл существует
-        **({"cookiefile": REDDIT_COOKIES_PATH}
-           if os.path.exists(REDDIT_COOKIES_PATH) else {}),
-        # берём cookies прямо из браузера, где вы залогинены в Reddit.
-        # это обходит требование авторизации и ошибку 403 Blocked.
-        "cookiefile": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "reddit_cookies.txt"
-        ),
-    }
+def _download_to(url: str, path: str) -> bool:
+    """Качает один файл по прямой ссылке. True — успех."""
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(post_url, download=True)
-            path = ydl.prepare_filename(info)
-            if not os.path.exists(path):
-                base = os.path.splitext(path)[0]
-                for ext in (".mp4", ".mkv", ".webm"):
-                    if os.path.exists(base + ext):
-                        path = base + ext
-                        break
-            if os.path.exists(path) and os.path.getsize(path) <= MAX_FILE_SIZE:
-                return path
-            logger.warning(
-                "Видео не получено или превышает лимит %s МБ: %s",
-                MAX_FILE_SIZE // (1024 * 1024), post_url
-            )
-            return None
+        resp = requests.get(url, headers=HEADERS, timeout=60, stream=True)
+        if resp.status_code != 200:
+            return False
+        downloaded = 0
+        with open(path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                downloaded += len(chunk)
+                if downloaded > MAX_FILE_SIZE:
+                    f.close()
+                    os.remove(path)
+                    return False
+                f.write(chunk)
+        return os.path.exists(path) and os.path.getsize(path) > 0
     except Exception:
-        logger.exception("Ошибка скачивания видео: %s", post_url)
+        return False
+
+
+def _download_video(video_url: str) -> str | None:
+    """
+    Качает reddit-видео напрямую: отдельно видео (fallback_url) и аудио,
+    затем склеивает через ffmpeg. Не зависит от yt-dlp/cookies.
+    video_url — прямая ссылка вида https://v.redd.it/<id>/DASH_720.mp4
+    """
+    try:
+        # базовый адрес вида https://v.redd.it/<id>
+        base = video_url.rsplit("/", 1)[0]
+        vid_id = base.rsplit("/", 1)[-1]
+
+        tmp = tempfile.gettempdir()
+        video_path = os.path.join(tmp, f"rd_{vid_id}_v.mp4")
+        audio_path = os.path.join(tmp, f"rd_{vid_id}_a.mp4")
+        out_path = os.path.join(tmp, f"rd_{vid_id}.mp4")
+
+        # 1) качаем видеодорожку
+        if not _download_to(video_url, video_path):
+            logger.warning("Не удалось скачать видеопоток: %s", video_url)
+            return None
+
+        # 2) пробуем найти и скачать аудиодорожку
+        audio_ok = False
+        for name in _AUDIO_NAMES:
+            if _download_to(f"{base}/{name}", audio_path):
+                audio_ok = True
+                break
+
+        # 3a) есть аудио и есть ffmpeg — склеиваем
+        if audio_ok and _has_ffmpeg():
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", video_path, "-i", audio_path,
+                     "-c", "copy", "-loglevel", "error", out_path],
+                    check=True,
+                )
+                # подчищаем промежуточные файлы
+                for p in (video_path, audio_path):
+                    if os.path.exists(p):
+                        os.remove(p)
+                if os.path.exists(out_path) and \
+                        os.path.getsize(out_path) <= MAX_FILE_SIZE:
+                    return out_path
+                return None
+            except Exception:
+                logger.exception("Ошибка склейки ffmpeg для %s", video_url)
+                # склейка не удалась — отдадим хотя бы видео без звука
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+                return video_path if os.path.exists(video_path) else None
+
+        # 3b) аудио нет (немое видео) или нет ffmpeg — отдаём только видео
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        if os.path.exists(video_path) and \
+                os.path.getsize(video_path) <= MAX_FILE_SIZE:
+            return video_path
+        return None
+    except Exception:
+        logger.exception("Ошибка скачивания видео: %s", video_url)
         return None
 
 

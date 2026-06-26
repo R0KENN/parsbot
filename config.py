@@ -57,5 +57,8 @@ JOBS_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "jobs.sqlite")
 # Путь к cookies для yt-dlp (видео Reddit). Если файла нет — качаем без него.
 REDDIT_COOKIES_PATH = os.path.join(os.path.dirname(__file__), "reddit_cookies.txt")
 
+# Cookies для обычных сайтов (yt-dlp). Если файла нет — качаем без него.
+SITE_COOKIES_PATH = os.path.join(os.path.dirname(__file__), "site_cookies.txt")
+
 # Сколько медиа можно слать одним альбомом (Telegram-лимит = 10)
 ALBUM_SIZE = 10

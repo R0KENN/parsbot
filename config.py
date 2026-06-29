@@ -22,7 +22,7 @@ SEEN_LIMIT = 5000
 DOWNLOAD_DELAY = 1.0
 
 # Пауза между ОТПРАВКАМИ в Telegram (секунды) — защита от flood limit.
-SEND_DELAY = 1.5
+SEND_DELAY = 2.5
 
 # Каждые сколько файлов слать сообщение о прогрессе
 PROGRESS_EVERY = 25

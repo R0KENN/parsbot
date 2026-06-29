@@ -249,8 +249,25 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
         state["done"] = done
         state["total"] = total
 
-    # отдельное закреплённое сообщение — только прогресс-бар
-    status = await bot.send_message(user_id, "🔍 Запускаю проверку…")
+    # отдельное закреплённое сообщение — только прогресс-бар.
+    # Защищаемся от flood limit: если Telegram просит подождать —
+    # ждём (но не больше 60 сек, иначе просто выходим).
+    status = None
+    for _attempt in range(3):
+        try:
+            status = await bot.send_message(user_id, "🔍 Запускаю проверку…")
+            break
+        except TelegramRetryAfter as e:
+            if e.retry_after > 60:
+                # Telegram забанил чат надолго — нет смысла ждать тут
+                return
+            await asyncio.sleep(e.retry_after + 1)
+        except TelegramNetworkError:
+            await asyncio.sleep(3)
+        except Exception:
+            return
+    if status is None:
+        return
     try:
         await bot.pin_chat_message(
             user_id, status.message_id, disable_notification=True)
@@ -278,11 +295,13 @@ async def _run_site_check_inner(bot, user_id: int, site_id: str, site: dict):
                     f"{_progress_bar(done, total)}" + foot)
         return "✅ Готово!" + foot
 
-    # фоновая задача-художник: раз в секунду перерисовывает сообщение
+    # фоновая задача-художник: раз в N секунд перерисовывает сообщение.
+    # Telegram считает частые правки одного сообщения флудом, поэтому
+    # держим интервал не меньше 3 секунд.
     async def painter():
         while state["active"]:
             await _safe_edit(status, render(), cache)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(3.0)
 
     paint_task = asyncio.create_task(painter())
 
